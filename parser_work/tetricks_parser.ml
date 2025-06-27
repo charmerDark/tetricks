@@ -26,20 +26,20 @@ let tokenize str =
 
 (* Function to convert AST to string for display *)
 let rec string_of_expr = function
-  | Ast.Einsum e -> 
-      sprintf "Einsum{notation=[%s]; tensors=[%s]}"
-        (String.concat "; " e.notation)
-        (String.concat "; " e.tensors)
+  | Ast.Einsum e ->
+      sprintf "Einsum{notation=\"%s\"; tensors=[%s]}"
+        e.notation
+        (String.concat "; " (List.map string_of_expr e.tensors))
   | Ast.BinOp (op, e1, e2) ->
       let op_str = match op with
         | Ast.Add -> "Add"
-        | Ast.Subtract -> "Subtract" 
+        | Ast.Subtract -> "Subtract"
         | Ast.Multiply -> "Multiply"
         | Ast.Divide -> "Divide"
       in
-      sprintf "BinOp(%s, %s, %s)" op_str 
+      sprintf "BinOp(%s, %s, %s)" op_str
         (string_of_expr e1) (string_of_expr e2)
-  | Ast.Variable v -> sprintf "Variable(%s)" v
+  | Ast.Tensor name -> sprintf "Tensor(%s)" name
 
 (* Function to parse a string *)
 let parse_string str =
@@ -61,9 +61,9 @@ let analyze_expression expr =
   
   (* Show AST *)
   match parse_string expr with
-  | Some ast -> 
+  | Some ast ->
       printf "AST: %s\n" (string_of_expr ast)
-  | None -> 
+  | None ->
       printf "Failed to parse\n";
   printf "\n"
 
@@ -78,6 +78,7 @@ let test_cases = [
   "einsum(\"ij,jk->ik\", A, B) + C";
   "einsum(\"ij,jk->ik\", A, B) * einsum(\"kl->l\", D)";
   "(A + B) * C";
+  "einsum(\"lmnop -> lp\", Q + T)";  (* New test case! *)
 ]
 
 (* Main function *)

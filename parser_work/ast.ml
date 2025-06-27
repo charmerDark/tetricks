@@ -1,5 +1,3 @@
-type einsum_notation = string list
-
 type bop =
 | Add
 | Subtract
@@ -9,9 +7,9 @@ type bop =
 type expr =
 | Einsum of einsum
 | BinOp of bop * expr * expr
-| Variable of string
+| Tensor of string
 
 and einsum = {
-  notation: einsum_notation;
-  tensors: string list;
+  notation: string;
+  tensors: expr list;
 }

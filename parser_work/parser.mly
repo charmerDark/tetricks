@@ -1,16 +1,18 @@
 %{
 open Ast
 
-(* Helper function to parse einsum notation string *)
-let parse_notation str =
-  let parts = String.split_on_char '>' str in
-  match parts with
-  | [input_part; output_part] ->
-      let inputs = String.split_on_char ',' (String.sub input_part 0 (String.length input_part - 1)) in
-      let output = String.trim output_part in
-      let output_list = if output = "" then [] else [output] in
-      List.map String.trim inputs @ output_list
-  | _ -> failwith ("Invalid einsum notation: " ^ str)
+let normalize_notation str =
+  let trimmed = String.trim str in
+  if String.contains trimmed '>' then
+    (* Handle "ijk-> " -> "ijk->" *)
+    let parts = String.split_on_char '>' trimmed in
+    match parts with
+    | [input; output] -> 
+        let clean_input = String.trim input in
+        let clean_output = String.trim output in
+        clean_input ^ "->" ^ clean_output
+    | _ -> trimmed
+  else trimmed
 %}
 
 %token <string> IDENT
@@ -23,9 +25,9 @@ let parse_notation str =
 
 %type <Ast.expr> expr
 %type <Ast.expr> einsum_expr
-%type <string list> tensor_list
-
+%type <Ast.expr list> expr_list 
 %start <Ast.expr> main
+
 
 %%
 
@@ -34,7 +36,7 @@ main:
 
 expr:
 | e=einsum_expr { e }
-| id=IDENT { Variable id }
+| id=IDENT { Tensor id } 
 | e1=expr PLUS e2=expr { BinOp (Add, e1, e2) }
 | e1=expr MINUS e2=expr { BinOp (Subtract, e1, e2) }
 | e1=expr TIMES e2=expr { BinOp (Multiply, e1, e2) }
@@ -42,10 +44,10 @@ expr:
 | LPAREN e=expr RPAREN { e }
 
 einsum_expr:
-| EINSUM LPAREN notation=STRING COMMA tensors=tensor_list RPAREN {
-    Einsum { notation = parse_notation notation; tensors = tensors }
+| EINSUM LPAREN notation=STRING COMMA tensors=expr_list RPAREN {
+    Einsum { notation = normalize_notation notation; tensors = tensors }
 }
 
-tensor_list:
-| t=IDENT COMMA tl=tensor_list { t :: tl }
-| t=IDENT { [t] }
+expr_list:
+| e=expr COMMA el=expr_list { e :: el }
+| e=expr { [e] }
