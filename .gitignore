@@ -2,3 +2,4 @@
 *.cmo
 *.mli
 *.o
+parser_work/_build/*
