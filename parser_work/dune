@@ -1,0 +1,10 @@
+(menhir
+ (modules parser))
+
+(ocamllex lexer)
+
+(executable
+ (name tetricks_parser)
+ (libraries menhirLib)
+ (modules tetricks_parser ast lexer parser)
+)
