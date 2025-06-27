@@ -1,3 +1,12 @@
+# Loop IR Design
+
+# Functionality required
+    Must be able to represent loop structure well enough to be analysed
+        - Loop variable - can be same as einsum variable
+        - loop range - inferred from einum onject passed
+        - ability to do loop fusion, tiling, unrollling jamming etc
+
+
 # Language Design
 
 ## Operations needed
