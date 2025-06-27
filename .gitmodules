@@ -1,0 +1,3 @@
+[submodule "libs/cgra-mapper"]
+	path = libs/cgra-mapper
+	url = https://github.com/charmerDark/CGRA-Mapper.git
