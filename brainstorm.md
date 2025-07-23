@@ -1,3 +1,15 @@
+
+# CGRA Mapping function:
+
+    ## what is the input
+        LLVM IR instructions?
+    ##what is the output
+        Just mapping and II?
+    ## Data Structures
+        - Architecture
+        - Instructions
+
+    
 # Loop IR Design
 
 # Functionality required
