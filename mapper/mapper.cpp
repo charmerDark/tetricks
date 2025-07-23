@@ -401,13 +401,39 @@ std::string getOpcodeName(const Instruction* I) {
     if (const BinaryOperator* binOp = dyn_cast<BinaryOperator>(I)) {
         return binOp->getOpcodeName();
     }
+    if (const CallInst* call = dyn_cast<CallInst>(I)) {
+        if (const Function* calledFunc = call->getCalledFunction()) {
+            if (calledFunc->getIntrinsicID() == Intrinsic::fmuladd) {
+                return "fmuladd";
+            }
+        }
+    }
     return "unknown";
 }
 
 // Helper: Is this instruction relevant for CGRA mapping?
 bool isArithmeticOrPHI(const Instruction* I) {
     if (isa<PHINode>(I)) return true;
-    if (isa<BinaryOperator>(I)) return true; // add, sub, mul, etc.
+    if (isa<BinaryOperator>(I)) return true;
+    
+    // Add support for LLVM intrinsics
+    if (const CallInst* call = dyn_cast<CallInst>(I)) {
+        if (const Function* calledFunc = call->getCalledFunction()) {
+            if (calledFunc->isIntrinsic()) {
+                // Accept common arithmetic intrinsics
+                switch (calledFunc->getIntrinsicID()) {
+                    case Intrinsic::fmuladd:
+                    case Intrinsic::fma:
+                    case Intrinsic::sqrt:
+                    case Intrinsic::sin:
+                    case Intrinsic::cos:
+                        return true;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
     return false;
 }
 
@@ -765,7 +791,240 @@ void printMappingVisualization(const MappingResult& result, const CGRAArchitectu
     std::cout << "INFO: Mapping completed successfully.\n";
     return true;
 }
-
+// bool mapDFGToCGRA(const DFG& dfg, const CGRAArchitecture& cgra, MappingResult& result) {
+//     std::cout << "\n=== Starting DFG to CGRA Mapping (Two-Phase Approach) ===\n";
+//     std::cout << "DFG: " << dfg.nodes.size() << " nodes, " << dfg.edges.size() << " edges\n";
+//     std::cout << "CGRA: " << cgra.rows << "x" << cgra.cols << " grid\n";
+    
+//     result.clear();
+    
+//     // Check if CGRA has enough resources
+//     if (dfg.nodes.empty()) {
+//         std::cout << "INFO: Empty DFG, nothing to map.\n";
+//         return true;
+//     }
+    
+//     // Create node ID to index mapping for easier access
+//     std::unordered_map<int, size_t> nodeIdToIndex;
+//     for (size_t i = 0; i < dfg.nodes.size(); ++i) {
+//         nodeIdToIndex[dfg.nodes[i].id] = i;
+//     }
+    
+//     // =================================================================
+//     // PHASE 1: TEMPORAL SCHEDULING
+//     // =================================================================
+//     std::cout << "\n--- Phase 1: Temporal Scheduling ---\n";
+    
+//     // Compute in-degree for topological sorting
+//     std::unordered_map<int, int> inDegree;
+//     for (const auto& node : dfg.nodes) {
+//         inDegree[node.id] = 0;
+//     }
+//     for (const auto& edge : dfg.edges) {
+//         inDegree[edge.dst]++;
+//     }
+    
+//     // Initialize ready queue with nodes that have no dependencies
+//     std::queue<int> ready;
+//     for (const auto& [nodeId, degree] : inDegree) {
+//         if (degree == 0) {
+//             ready.push(nodeId);
+//         }
+//     }
+    
+//     // Schedule each node at the earliest possible time
+//     std::unordered_map<int, int> nodeSchedule; // nodeId -> time step
+//     std::unordered_map<int, int> nodeFinishTime; // nodeId -> finish time
+//     const int CONSERVATIVE_ROUTING_DELAY = 1; // Conservative estimate for any routing
+//     const int EXECUTION_TIME = 1; // Assume all operations take 1 cycle
+    
+//     int scheduledNodes = 0;
+//     while (!ready.empty()) {
+//         int nodeId = ready.front();
+//         ready.pop();
+        
+//         // Find earliest start time based on dependencies
+//         int earliestStart = 0;
+//         for (const auto& edge : dfg.edges) {
+//             if (edge.dst == nodeId) {
+//                 // This node depends on edge.src
+//                 auto finishIt = nodeFinishTime.find(edge.src);
+//                 if (finishIt != nodeFinishTime.end()) {
+//                     int depFinishTime = finishIt->second;
+//                     int routingDelay = edge.isLoopCarried ? 0 : CONSERVATIVE_ROUTING_DELAY;
+//                     earliestStart = std::max(earliestStart, depFinishTime + routingDelay);
+//                 }
+//             }
+//         }
+        
+//         // Schedule this node
+//         nodeSchedule[nodeId] = earliestStart;
+//         nodeFinishTime[nodeId] = earliestStart + EXECUTION_TIME;
+//         scheduledNodes++;
+        
+//         // Update successors
+//         for (const auto& edge : dfg.edges) {
+//             if (edge.src == nodeId) {
+//                 inDegree[edge.dst]--;
+//                 if (inDegree[edge.dst] == 0) {
+//                     ready.push(edge.dst);
+//                 }
+//             }
+//         }
+//     }
+    
+//     if (scheduledNodes != dfg.nodes.size()) {
+//         std::cerr << "ERROR: Phase 1 failed - could not schedule all nodes (cyclic dependencies?)\n";
+//         std::cerr << "       Scheduled: " << scheduledNodes << "/" << dfg.nodes.size() << " nodes\n";
+//         return false;
+//     }
+    
+//     std::cout << "Phase 1 complete: Scheduled " << scheduledNodes << " nodes\n";
+    
+//     // =================================================================
+//     // PHASE 2: SPATIAL PLACEMENT
+//     // =================================================================
+//     std::cout << "\n--- Phase 2: Spatial Placement ---\n";
+    
+//     // Group nodes by their scheduled time
+//     std::map<int, std::vector<int>> timeToNodes;
+//     for (const auto& [nodeId, time] : nodeSchedule) {
+//         timeToNodes[time].push_back(nodeId);
+//     }
+    
+//     // Track PE usage: (row, col, time) -> nodeId
+//     std::map<std::tuple<int, int, int>, int> peUsage;
+//     std::unordered_map<int, std::pair<int, int>> nodePlacement; // nodeId -> (row, col)
+    
+//     // Process each time step in order
+//     for (const auto& [timeStep, nodesAtTime] : timeToNodes) {
+//         std::cout << "Placing " << nodesAtTime.size() << " nodes at time " << timeStep << std::endl;
+        
+//         for (int nodeId : nodesAtTime) {
+//             const DFGNode& node = dfg.nodes[nodeIdToIndex[nodeId]];
+            
+//             // Find the best position for this node
+//             std::pair<int, int> bestPosition{-1, -1};
+//             int bestCost = INT_MAX;
+            
+//             // Try all available PEs
+//             for (int row = 0; row < cgra.rows; ++row) {
+//                 for (int col = 0; col < cgra.cols; ++col) {
+//                     const CGRANode& pe = cgra.getNode(row, col);
+                    
+//                     // Check if PE can execute this operation
+//                     if (!pe.canExecute(node.opcode)) {
+//                         continue;
+//                     }
+                    
+//                     // Check if PE is free at this time
+//                     if (peUsage.count({row, col, timeStep}) > 0) {
+//                         continue;
+//                     }
+                    
+//                     // Calculate placement cost (routing cost to predecessors)
+//                     int placementCost = 0;
+//                     for (const auto& edge : dfg.edges) {
+//                         if (edge.dst == nodeId) {
+//                             auto predPosIt = nodePlacement.find(edge.src);
+//                             if (predPosIt != nodePlacement.end()) {
+//                                 auto predPos = predPosIt->second;
+//                                 int routingCost = manhattanDistance(predPos, {row, col});
+//                                 placementCost += routingCost;
+//                             }
+//                         }
+//                     }
+                    
+//                     // Select position with minimum cost
+//                     if (placementCost < bestCost) {
+//                         bestCost = placementCost;
+//                         bestPosition = {row, col};
+//                     }
+//                 }
+//             }
+            
+//             // Check if we found a valid position
+//             if (bestPosition.first == -1) {
+//                 std::cerr << "ERROR: Phase 2 failed - cannot place node " << nodeId 
+//                          << " (opcode: " << node.opcode << ") at time " << timeStep << std::endl;
+//                 std::cerr << "       No compatible or available PE found\n";
+//                 return false;
+//             }
+            
+//             // Place the node
+//             peUsage[{bestPosition.first, bestPosition.second, timeStep}] = nodeId;
+//             nodePlacement[nodeId] = bestPosition;
+//             result.addMapping(nodeId, bestPosition.first, bestPosition.second, timeStep);
+            
+//             std::cout << "  Node " << nodeId << " (" << node.opcode << ") -> (" 
+//                      << bestPosition.first << "," << bestPosition.second << ") cost=" << bestCost << std::endl;
+//         }
+//     }
+    
+//     std::cout << "Phase 2 complete: Placed " << nodePlacement.size() << " nodes\n";
+    
+//     // =================================================================
+//     // PHASE 3: ROUTING AND VALIDATION
+//     // =================================================================
+//     std::cout << "\n--- Phase 3: Routing and Validation ---\n";
+    
+//     // Calculate actual routes and check timing constraints
+//     bool needRescheduling = false;
+//     for (const auto& edge : dfg.edges) {
+//         auto srcPosIt = nodePlacement.find(edge.src);
+//         auto dstPosIt = nodePlacement.find(edge.dst);
+        
+//         if (srcPosIt != nodePlacement.end() && dstPosIt != nodePlacement.end()) {
+//             auto srcPos = srcPosIt->second;
+//             auto dstPos = dstPosIt->second;
+            
+//             // Calculate actual route
+//             Route route = findRoute(srcPos, dstPos, cgra);
+//             result.addRoute(edge.src, edge.dst, route);
+            
+//             // Check if actual routing delay violates timing
+//             int actualRoutingDelay = route.delay();
+//             int srcFinishTime = nodeSchedule[edge.src] + EXECUTION_TIME;
+//             int dstStartTime = nodeSchedule[edge.dst];
+//             int requiredDelay = edge.isLoopCarried ? 0 : actualRoutingDelay;
+            
+//             if (dstStartTime < srcFinishTime + requiredDelay) {
+//                 std::cerr << "WARNING: Timing violation on edge " << edge.src << " -> " << edge.dst
+//                          << " (actual routing delay: " << actualRoutingDelay 
+//                          << ", conservative estimate: " << CONSERVATIVE_ROUTING_DELAY << ")\n";
+//                 needRescheduling = true;
+//             }
+//         }
+//     }
+    
+//     if (needRescheduling) {
+//         std::cerr << "ERROR: Routing delays exceeded conservative estimates - rescheduling needed\n";
+//         std::cerr << "       Consider increasing CONSERVATIVE_ROUTING_DELAY or implementing rescheduling\n";
+//         return false;
+//     }
+    
+//     // Final validation
+//     if (!result.isValidMapping(dfg, cgra)) {
+//         std::cerr << "ERROR: Final mapping validation failed\n";
+//         return false;
+//     }
+    
+//     std::cout << "\n=== Mapping Successful ===\n";
+//     std::cout << "Total schedule length: " << (result.maxTimeStep + 1) << " cycles\n";
+//     std::cout << "Average routing delay: ";
+    
+//     if (!result.routing.empty()) {
+//         int totalDelay = 0;
+//         for (const auto& [edge, route] : result.routing) {
+//             totalDelay += route.delay();
+//         }
+//         std::cout << (totalDelay / static_cast<double>(result.routing.size())) << std::endl;
+//     } else {
+//         std::cout << "0 (all operations adjacent)\n";
+//     }
+    
+//     return true;
+// }
 
 // =============================================================================
 // MAIN FUNCTION
