@@ -3,3 +3,6 @@
 *.mli
 *.o
 parser_work/_build/*
+*.dot
+*.ll
+*.bc
