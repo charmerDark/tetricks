@@ -52,7 +52,7 @@ struct DFGEdge {
 struct DFG {
     std::vector<DFGNode> nodes;
     std::vector<DFGEdge> edges;
-    std::unordered_map<const llvm::Instruction*, int> instToId;
+    std::unordered_map<const llvm::Instruction*, int> instToId; // Map from instruction object to ID
     
     // Helper to find all predecessors of a node
     std::vector<int> getPredecessors(int nodeId) const {
@@ -103,7 +103,7 @@ struct CGRANode {
 
 /**
  * Represents the complete CGRA architecture
- * Design Decision: 2D mesh with nearest-neighbor connectivity. TODO: make this variable
+ * Design Decision: 2D mesh with nearest-neighbor connectivity. TODO: make this variable, currently also assumes all tiles can access memory
  */
 struct CGRAArchitecture {
     int rows, cols;
@@ -157,7 +157,6 @@ struct CGRAArchitecture {
 /**
  * Represents a routing path between two CGRA nodes
  * Design Decision: Explicit path storage with delay calculation
- * Rationale: Allows precise timing analysis and routing conflict detection
  */
 struct Route {
     std::vector<std::pair<int,int>> path;  // Sequence of (row,col) coordinates
@@ -374,11 +373,13 @@ bool MappingResult::isValidMapping(const DFG& dfg, const CGRAArchitecture& cgra)
 }
 
 // =============================================================================
-// DFG GENERATION (Enhanced from original)
+// DFG GENERATION
 // =============================================================================
 
 // Helper: Find the innermost loop in a function
+//
 Loop* findInnermostLoop(LoopInfo &LI) {
+
     for (auto *L : LI) {
         std::vector<Loop*> stack;
         stack.push_back(L);
@@ -386,6 +387,8 @@ Loop* findInnermostLoop(LoopInfo &LI) {
             Loop *cur = stack.back();
             stack.pop_back();
             if (cur->getSubLoops().empty()) {
+                //Returns first inner loop found in a function CFG - not an issue for einsum
+                //but needs to be re-evaluated for robustness
                 return cur;
             }
             for (auto *sub : cur->getSubLoops())
@@ -395,7 +398,7 @@ Loop* findInnermostLoop(LoopInfo &LI) {
     return nullptr;
 }
 
-// Helper: Extract opcode from LLVM instruction
+// Helper: Extract opcode from LLVM instruction. TODO: investiate if all necessary operationsof eisum are covered.
 std::string getOpcodeName(const Instruction* I) {
     if (isa<PHINode>(I)) return "phi";
     if (const BinaryOperator* binOp = dyn_cast<BinaryOperator>(I)) {
@@ -424,9 +427,9 @@ bool isArithmeticOrPHI(const Instruction* I) {
                 switch (calledFunc->getIntrinsicID()) {
                     case Intrinsic::fmuladd:
                     case Intrinsic::fma:
-                    case Intrinsic::sqrt:
-                    case Intrinsic::sin:
-                    case Intrinsic::cos:
+                    // case Intrinsic::sqrt: //not in list of operations supported by tetricks
+                    // case Intrinsic::sin: //not useful for einsum expressions
+                    // case Intrinsic::cos:
                         return true;
                     default:
                         break;
@@ -498,6 +501,38 @@ DFG generateDFGForArithmeticAndPHI(llvm::Loop *loop) {
 
     return dfg;
 }
+
+//Alternate attempt at mapping instructions to DFG
+
+// DFG generateDFGForEinsumLoop(BasicBlock *loopBody) {
+//     DFG dfg;
+//     int id = 0;
+
+//     // 1. Collect nodes
+//     for (const Instruction &I : *loopBody) {
+//         DFGNode node;
+//         node.id = id;
+//         node.label = I.getOpcodeName();
+//         dfg.nodes.push_back(node);
+//         dfg.instToId[&I] = id++;
+//     }
+
+//     // 2. Collect edges (data dependencies)
+//     for (const Instruction &I : *loopBody) {
+//         int dstID = dfg.instToId[&I];
+//         for (const Use &U : I.operands()) {
+//             if (const Instruction *srcInst = dyn_cast<Instruction>(U.get())) {
+//                 if (dfg.instToId.count(srcInst)) {
+//                     int srcID = dfg.instToId[srcInst];
+//                     dfg.edges.push_back({srcID, dstID});
+//                 }
+//             }
+//         }
+//     }
+
+//     return dfg;
+// }
+
 
 // =============================================================================
 // PRINTING AND VISUALIZATION FUNCTIONS
