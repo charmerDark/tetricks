@@ -8,6 +8,12 @@
     ## Data Structures
         - Architecture
         - Instructions
+    
+    Inter loop dependencies can appear in einsum operations. einsum("i,i -> ",A), all accumulated onto the same variable so atomicwrites maight be needed
+    einsum('ij,ik->jk', A, B) - I think this is not an issue in my case
+
+    Read innermost loop's body (will not contain if statements etc in my case, should be a simple loop of fmul, fmuladd, etc)
+    Map DFG to RoutingMap (n_row x n_col x II) => constraints: need to respect dependencies in code (wont most cases have no dependency?)
 
     
 # Loop IR Design
