@@ -11,6 +11,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <map>
 #include <unordered_map>
@@ -440,150 +441,11 @@ bool isArithmetic(const Instruction* I) {
     return false;
 }
 
-// bool isArithmeticOrPHI(const Instruction* I) {
-//     if (isa<PHINode>(I)) return true;
-//     if (isa<BinaryOperator>(I)) return true;
-    
-//     // Add support for LLVM intrinsics
-//     if (const CallInst* call = dyn_cast<CallInst>(I)) {
-//         if (const Function* calledFunc = call->getCalledFunction()) {
-//             if (calledFunc->isIntrinsic()) {
-//                 // Accept common arithmetic intrinsics
-//                 switch (calledFunc->getIntrinsicID()) {
-//                     case Intrinsic::fmuladd:
-//                     case Intrinsic::fma:
-//                     // case Intrinsic::sqrt: //not in list of operations supported by tetricks
-//                     // case Intrinsic::sin: //not useful for einsum expressions
-//                     // case Intrinsic::cos:
-//                         return true;
-//                     default:
-//                         break;
-//                 }
-//             }
-//         }
-//     }
-//     return false;
-// }
-
-/**
- * Generate DFG from LLVM loop, enhanced with opcode information
- */
-// DFG generateDFGForMapping(llvm::Loop *loop) {
-//     DFG dfg;
-//     int id = 0;
-
-//     // 1. Collect nodes (instructions)
-//     std::set<const llvm::Instruction*> loopInsts;
-//     for (auto *BB : loop->blocks()) {
-//         for (const llvm::Instruction &I : *BB) {
-//             if (isArithmetic(&I)) {
-//                 loopInsts.insert(&I);
-//             }
-//         }
-//     }
-
-    
-//     for (const llvm::Instruction* I : loopInsts) {
-//         std::string instrStr;
-//         llvm::raw_string_ostream rso(instrStr);
-//         I->print(rso);
-        
-//         DFGNode node;
-//         node.id = id;
-//         node.label = rso.str();
-//         node.opcode = getOpcodeName(I);
-        
-//         dfg.nodes.push_back(node);
-//         dfg.instToId[I] = id++;
-//     }
-
-//     // 2. Collect edges (data dependencies)
-//     for (const llvm::Instruction* I : loopInsts) {
-//         int srcID = dfg.instToId[I];
-
-//         for (const llvm::User *U : I->users()) {
-//             if (const llvm::Instruction *userInst = llvm::dyn_cast<llvm::Instruction>(U)) {
-//                 if (loopInsts.count(userInst)) {
-//                     int dstID = dfg.instToId[userInst];
-//                     dfg.edges.push_back({srcID, dstID, false}); // dependency
-//                 }
-//             }
-//         }
-//     }
-
-//     return dfg;
-// }
-
-// DFG generateDFGForMapping(llvm::Loop *loop) {
-//     DFG dfg;
-//     int id = 0;
-
-//     // 1. Collect arithmetic instructions in program order.
-//     std::vector<const llvm::Instruction*> arithmeticInsts;
-//     for (auto *BB : loop->getBlocks()) { // Use getBlocks() for defined order
-//         for (const llvm::Instruction &I : *BB) {
-//             if (isArithmetic(&I)) {
-//                 arithmeticInsts.push_back(&I);
-//             }
-//         }
-//     }
-
-//     // 2. Remove the last arithmetic instruction if the list is not empty.
-//     if (!arithmeticInsts.empty()) {
-//         arithmeticInsts.pop_back();
-//     }
-
-//     // 3. Create DFG nodes from the filtered list.
-//     for (const llvm::Instruction* I : arithmeticInsts) {
-//         std::string instrStr;
-//         llvm::raw_string_ostream rso(instrStr);
-//         I->print(rso);
-        
-//         DFGNode node;
-//         node.id = id;
-//         node.label = rso.str();
-//         node.opcode = getOpcodeName(I);
-        
-//         dfg.nodes.push_back(node);
-//         dfg.instToId[I] = id++;
-//     }
-
-//     // 4. Collect edges for the nodes in the DFG.
-//     for (const llvm::Instruction* I : arithmeticInsts) {
-//         int srcID = dfg.instToId.at(I); // Use .at() for safety
-
-//         for (const llvm::User *U : I->users()) {
-//             if (const llvm::Instruction *userInst = llvm::dyn_cast<llvm::Instruction>(U)) {
-//                 // Check if the user instruction is also in our DFG map.
-//                 if (dfg.instToId.count(userInst)) {
-//                     int dstID = dfg.instToId.at(userInst);
-//                     dfg.edges.push_back({srcID, dstID, false}); // dependency
-//                 }
-//             }
-//         }
-//     }
-
-//     return dfg;
-// }
 
 DFG generateDFGForMapping(llvm::Loop *loop) {
     DFG dfg;
     int id = 0;
     
-    // 1. Identify the loop induction variable's update instruction.
-    const llvm::Instruction* inductionUpdateInst = nullptr;
-    if (llvm::PHINode *iv = loop->getCanonicalInductionVariable()) {
-        if (llvm::BasicBlock *latch = loop->getLoopLatch()) {
-            if (llvm::Value *incomingValue = iv->getIncomingValueForBlock(latch)) {
-                inductionUpdateInst = llvm::dyn_cast<llvm::Instruction>(incomingValue);
-                if (inductionUpdateInst) {
-                    llvm::errs() << "Induction update instruction found: ";
-                    inductionUpdateInst->print(llvm::errs());
-                    llvm::errs() << "\n";
-                }
-            }
-        }
-    }
     
     // Helper function to check if an instruction is immediately used by an ICMP
     auto isUsedByICMP = [](const llvm::Instruction* inst) -> bool {
@@ -596,19 +458,62 @@ DFG generateDFGForMapping(llvm::Loop *loop) {
         }
         return false;
     };
-    
+
+    auto isUsedByGEP = [](const llvm::Instruction* inst) -> bool {
+        for (const llvm::User *user : inst->users()) {
+            if (const llvm::Instruction *userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
+                if (userInst->getOpcode() == llvm::Instruction::GetElementPtr) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    auto isUsedByPHI = [](const llvm::Instruction* inst) -> bool {
+        bool hasPhiUser = false;
+        bool hasStoreUser = false;
+        
+        for (const llvm::User *user : inst->users()) {
+            if (const llvm::PHINode *phiNode = llvm::dyn_cast<llvm::PHINode>(user)) {
+                // Check if the instruction is used as a value (not as a label/block)
+                for (unsigned i = 0; i < phiNode->getNumIncomingValues(); ++i) {
+                    if (phiNode->getIncomingValue(i) == inst) {
+                        hasPhiUser = true;
+                        break;
+                    }
+                }
+            }
+            else if (const llvm::Instruction *userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
+                if (userInst->getOpcode() == llvm::Instruction::Store) {
+                    hasStoreUser = true;
+                }
+            }
+        }
+       
+        return hasPhiUser && !hasStoreUser;
+    };
+
     std::vector<const llvm::Instruction*> dfgInsts;
     for (auto *BB : loop->getBlocks()) {
         for (const llvm::Instruction &I : *BB) {
-            // Exclude arithmetic operations that are:
-            // 1. The induction update instruction, OR
-            // 2. Immediately used by an ICMP instruction
-            if (isArithmetic(&I) && &I != inductionUpdateInst && !isUsedByICMP(&I)) {
-                dfgInsts.push_back(&I);
-
-                llvm::errs() << "Skipping arithmetic instruction used by ICMP: ";
-                I.print(llvm::errs());
-                llvm::errs() << "\n";
+            if (isArithmetic(&I) ) {
+                if (isUsedByICMP(&I)) {
+                    // Print the instruction being skipped
+                    llvm::errs() << "Skipping arithmetic instruction used by ICMP: ";
+                    I.print(llvm::errs());
+                    llvm::errs() << "\n";
+                } else if (isUsedByGEP(&I)){
+                    llvm::errs() << "Skipping arithmetic instruction used by GEP: ";
+                    I.print(llvm::errs());
+                    llvm::errs() << "\n";
+                } else if (isUsedByPHI(&I)){
+                    llvm::errs() << "Skipping arithmetic instruction used by Phi Node: ";
+                    I.print(llvm::errs());
+                    llvm::errs() << "\n";
+                }
+                else {
+                    dfgInsts.push_back(&I);
+                }
             }
         }
     }
@@ -640,45 +545,23 @@ DFG generateDFGForMapping(llvm::Loop *loop) {
     return dfg;
 }
 
-//Alternate attempt at mapping instructions to DFG
-
-// DFG generateDFGForEinsumLoop(BasicBlock *loopBody) {
-//     DFG dfg;
-//     int id = 0;
-
-//     // 1. Collect nodes
-//     for (const Instruction &I : *loopBody) {
-//         DFGNode node;
-//         node.id = id;
-//         node.label = I.getOpcodeName();
-//         dfg.nodes.push_back(node);
-//         dfg.instToId[&I] = id++;
-//     }
-
-//     // 2. Collect edges (data dependencies)
-//     for (const Instruction &I : *loopBody) {
-//         int dstID = dfg.instToId[&I];
-//         for (const Use &U : I.operands()) {
-//             if (const Instruction *srcInst = dyn_cast<Instruction>(U.get())) {
-//                 if (dfg.instToId.count(srcInst)) {
-//                     int srcID = dfg.instToId[srcInst];
-//                     dfg.edges.push_back({srcID, dstID});
-//                 }
-//             }
-//         }
-//     }
-
-//     return dfg;
-// }
-
 
 // =============================================================================
 // PRINTING AND VISUALIZATION FUNCTIONS
 // =============================================================================
 
-void printDFGasDot(const DFG& dfg) {
-    std::cout << "digraph DFG {\n";
-    std::cout << "  node [shape=box, fontname=\"monospace\"];\n";
+void dumpDFGasDot(const DFG& dfg, const std::string& filename) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for writing.\n";
+    }
+
+    // Create an array of output streams: file and cout
+    std::ostream* outs[] = { &file, &std::cout };
+
+    for (auto out : outs) *out << "digraph DFG {\n";
+    for (auto out : outs) *out << " node [shape=box, fontname=\"monospace\"];\n";
+
     for (const auto& node : dfg.nodes) {
         std::string label = node.label;
         size_t pos = 0;
@@ -686,15 +569,24 @@ void printDFGasDot(const DFG& dfg) {
             label.replace(pos, 1, "\\\"");
             pos += 2;
         }
-        std::cout << "  " << node.id << " [label=\"ID:" << node.id << "\\n" 
-                  << "Op:" << node.opcode << "\\n" << label << "\"];\n";
+        for (auto out : outs) {
+            *out << " " << node.id << " [label=\"ID:" << node.id << "\\n"
+                 << "Op:" << node.opcode << "\\n" << label << "\"];\n";
+        }
     }
+
     for (const auto& edge : dfg.edges) {
-        std::cout << "  " << edge.src << " -> " << edge.dst;
-        if (edge.isLoopCarried) std::cout << " [color=blue, label=\"LC\"]";
-        std::cout << ";\n";
+        for (auto out : outs) {
+            *out << " " << edge.src << " -> " << edge.dst;
+            if (edge.isLoopCarried) *out << " [color=blue, label=\"LC\"]";
+            *out << ";\n";
+        }
     }
-    std::cout << "}\n";
+
+    for (auto out : outs) *out << "}\n";
+    file.close();
+
+    std::cout << "DFG DOT file written to: " << filename << std::endl;
 }
 
 void printCGRAArchitecture(const CGRAArchitecture& cgra) {
@@ -1206,6 +1098,7 @@ void printMappingVisualization(const MappingResult& result, const CGRAArchitectu
 int main(int argc, char** argv) {
     std::string filename;
     std::string funcname;
+    std::string dotfilepath;
     int nrow = 3, ncol = 3;  // Default CGRA dimensions
 
     // Command line argument parsing
@@ -1219,15 +1112,18 @@ int main(int argc, char** argv) {
             nrow = std::atoi(argv[++i]);
         } else if (arg == "--ncol" && i + 1 < argc) {
             ncol = std::atoi(argv[++i]);
+        }  else if (arg == "-dotfile" && i + 1 < argc) {
+            dotfilepath = argv[++i];
         }
     }
 
     if (filename.empty() || funcname.empty()) {
-        std::cerr << "Usage: " << argv[0] << " -f <filename> -fn <function_name> [--nrow N] [--ncol M]\n";
+        std::cerr << "Usage: " << argv[0] << " -f <filename> -fn <function_name> [--nrow N] [--ncol M] --dotfile <filename>\n";
         std::cerr << "  -f <filename>     : LLVM IR file to parse\n";
         std::cerr << "  -fn <function>    : Function name to analyze\n";
         std::cerr << "  --nrow N          : Number of CGRA rows (default: 3)\n";
         std::cerr << "  --ncol M          : Number of CGRA columns (default: 3)\n";
+        std::cerr <<"   --dotfile <output.dot>: DFG dot file dumped here\n";
         return 1;
     }
 
@@ -1277,7 +1173,7 @@ int main(int argc, char** argv) {
 
     // Print DFG in DOT format
     std::cout << "=== Data Flow Graph (DOT format) ===\n";
-    printDFGasDot(dfg);
+    dumpDFGasDot(dfg,dotfilepath );
 
     // Attempt to map DFG to CGRA
     MappingResult mappingResult;
