@@ -30,9 +30,13 @@ void kernel(const float (* __restrict__ A)[DIM_I][DIM_J],
     for (int b = 0; b < DIM_B; b++) {
         for (int i = 0; i < DIM_I; i++) {
             for (int k = 0; k < DIM_K; k++) {
-                for (int j = 0; j < DIM_J; j++) {
-                    output[b][i][k] += A[b][i][j] * B[b][j][k];
-                }
+                // for (int j = 0; j < DIM_J; j++) {
+                    // output[b][i][k] += A[b][i][j] * B[b][j][k];
+                // }
+                output[b][i][k] += A[b][i][0] * B[b][0][k];
+                output[b][i][k] += A[b][i][1] * B[b][1][k];
+                output[b][i][k] += A[b][i][2] * B[b][2][k];
+                output[b][i][k] += A[b][i][3] * B[b][3][k];
             }
         }
     }

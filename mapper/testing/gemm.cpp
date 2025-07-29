@@ -35,9 +35,15 @@ void kernel(float A[][DIM_J], float B[][DIM_K], float C[][DIM_K], float alpha, f
   
   for(i = 0; i < DIM_I; i++){
       for(k = 0; k < DIM_K; k++){
-          for(j = 0; j < DIM_J; j++){
+          for(j = 0; j < DIM_J; j+=3){
               output[i][k] += alpha * A[i][j] * B[j][k];
+              output[i][k] += alpha * A[i][j+1] * B[j+1][k];
+              output[i][k] += alpha * A[i][j+2] * B[j+2][k];
           }
+        // output[i][k] += alpha * A[i][0] * B[0][k];
+        // output[i][k] += alpha * A[i][1] * B[1][k];
+        // output[i][k] += alpha * A[i][2] * B[2][k];
+        // output[i][k] += alpha * A[i][3] * B[3][k];
       }
   }
 }
