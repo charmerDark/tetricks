@@ -5,6 +5,7 @@
 
 (executable
  (name tetricks_parser)
- (libraries menhirLib)
+ (libraries yojson ppx_deriving_yojson menhirLib)
+ (preprocess (pps ppx_deriving_yojson))
  (modules tetricks_parser ast lexer parser)
 )
