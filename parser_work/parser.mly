@@ -25,9 +25,8 @@ let normalize_notation str =
 
 %type <Ast.expr> expr
 %type <Ast.expr> einsum_expr
-%type <Ast.expr list> expr_list 
+%type <string list> tensor_list 
 %start <Ast.expr> main
-
 
 %%
 
@@ -44,10 +43,10 @@ expr:
 | LPAREN e=expr RPAREN { e }
 
 einsum_expr:
-| EINSUM LPAREN notation=STRING COMMA tensors=expr_list RPAREN {
+| EINSUM LPAREN notation=STRING COMMA tensors=tensor_list RPAREN {
     Einsum { notation = normalize_notation notation; tensors = tensors }
 }
 
-expr_list:
-| e=expr COMMA el=expr_list { e :: el }
-| e=expr { [e] }
+tensor_list:
+| id=IDENT COMMA tl=tensor_list { id :: tl }
+| id=IDENT { [id] }

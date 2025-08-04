@@ -5,14 +5,17 @@ type bop =
 | Divide
 [@@deriving yojson]
 
+type tensor = string
+[@@deriving yojson]
+
 type expr =
 | Einsum of einsum
 | BinOp of bop * expr * expr
-| Tensor of string
+| Tensor of tensor
 [@@deriving yojson]
 
 and einsum = {
   notation: string;
-  tensors: expr list;
+  tensors: tensor list;
 }
 [@@deriving yojson]
