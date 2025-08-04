@@ -39,12 +39,45 @@ struct expr {
 
 struct Tensor : expr {
   string name;
-  int num_dims = -1;  // -1 means unknown/uninitialized
-  bool dims_inferred = false;  // track if dimensions were inferred
+  int num_dims = -1;
+  bool dims_inferred = false;
+  
+  // Track which tensor/dimension determines each of our dimensions - mainly for temp variables generated in the process
+  struct DimensionSource {
+      shared_ptr<Tensor> source_tensor;
+      int source_dim_index;
+      
+      DimensionSource() = default;
+      DimensionSource(shared_ptr<Tensor> tensor, int dim) 
+          : source_tensor(tensor), source_dim_index(dim) {}
+  };
+  
+  vector<DimensionSource> dim_sources;  // One per dimension
   
   Tensor(const string &n) : name(n) {}
   Tensor(const string &n, int dims, bool inferred = false) 
-      : name(n), num_dims(dims), dims_inferred(inferred) {}
+      : name(n), num_dims(dims), dims_inferred(inferred) {
+      dim_sources.resize(dims);  // Initialize empty sources
+  }
+  
+  // Helper to set dimension source for intermediary temp tensors
+  void setDimensionSource(int our_dim, shared_ptr<Tensor> source_tensor, int source_dim) {
+      if (our_dim >= 0 && our_dim < dim_sources.size()) {
+          dim_sources[our_dim] = DimensionSource(source_tensor, source_dim);
+      }
+  }
+  
+  // Helper to get dimension reference for code generation
+  string getDimensionRef(int dim_index) const {
+      if (dim_index >= 0 && dim_index < dim_sources.size()) {
+          const auto& source = dim_sources[dim_index];
+          if (source.source_tensor) {
+              return source.source_tensor->name + ".shape[" + to_string(source.source_dim_index) + "]";
+          }
+      }
+      // Fallback for original tensors or unknown sources
+      return name + ".shape[" + to_string(dim_index) + "]";
+  }
 };
 
 struct EinsumNode : expr {
@@ -96,9 +129,7 @@ struct BinOpNode : expr {
   BinOpKind opn;
   shared_ptr<expr> inp1;
   shared_ptr<expr> inp2;
-  BinOpNode(BinOpKind operation, shared_ptr<expr> input1,
-            shared_ptr<expr> input2)
-      : opn(operation), inp1(input1), inp2(input2) {}
+  BinOpNode(BinOpKind operation, shared_ptr<expr> input1, shared_ptr<expr> input2): opn(operation), inp1(input1), inp2(input2) {}
 };
 
 
@@ -319,30 +350,61 @@ struct LoopNode : IRNode {
 };
 
 struct SequenceNode : IRNode {
-  /*
-  Essentialy queue of loop nests. BinOpNode(Add, EinsumNode("ij,jk->ik",A,B), C)
-  */
   vector<shared_ptr<IRNode>> operations;
+  map<string, string> temp_declarations; // temp_name -> declaration (e.g., "double temp1[10][20];")
+  string result_temp; // Which temp variable holds the final result
   
-  SequenceNode(const vector<shared_ptr<IRNode>>& ops) : operations(ops) {}
+  SequenceNode() = default;
   
-  // Helper to add operations
   void addOperation(shared_ptr<IRNode> op) {
       operations.push_back(op);
   }
-};
+  
+  void addTempDeclaration(const string& temp_name, const string& declaration) {
+      temp_declarations[temp_name] = declaration;
+  }
+  
+  void setResultTemp(const string& temp) {
+      result_temp = temp;
+  }
+};;
 
-// Global counter for temporary variables
-static int temp_counter = 1;
-
-// Print IR structure (abstract representation)
+// Print IR structure (abstract representation for debugging)
 void printIR(shared_ptr<IRNode> node, int indent = 0) {
   if (!node)
     return;
 
   string indentStr(indent * 2, ' ');
 
-  if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+    cout << indentStr << "SequenceNode {" << endl;
+    
+    // Print temp declarations first (matches code generation order)
+    if (!seqNode->temp_declarations.empty()) {
+      cout << indentStr << "  // Temporary variable declarations" << endl;
+      for (const auto& decl : seqNode->temp_declarations) {
+        cout << indentStr << "  " << decl.second << endl;
+      }
+      cout << endl;
+    }
+    
+    // Print operations in sequence
+    if (!seqNode->operations.empty()) {
+      for (size_t i = 0; i < seqNode->operations.size(); i++) {
+        printIR(seqNode->operations[i], indent + 1);
+        if (i < seqNode->operations.size() - 1) {
+          cout << endl; // Add spacing between operations
+        }
+      }
+    }
+    
+    // Print result info at the end
+    if (!seqNode->result_temp.empty()) {
+      cout << endl << indentStr << "  // Result stored in: " << seqNode->result_temp << endl;
+    }
+    
+    cout << indentStr << "}" << endl;
+  } else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
     cout << indentStr << "LoopNode {" << endl;
     cout << indentStr << "  variable: '" << loopNode->loop_variable << "'"
          << endl;
@@ -356,13 +418,29 @@ void printIR(shared_ptr<IRNode> node, int indent = 0) {
          << endl;
   }
 }
-
 // Generate C++ code from IR
 void generateCode(shared_ptr<IRNode> node, int indent = 0) {
+
   if (!node)
     return;
 
   string indentStr(indent * 2, ' ');
+  
+  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+      // Generate temp declarations first
+      cout << indentStr << "// Temporary variable declarations" << endl;
+
+      for (auto& decl : seqNode->temp_declarations) {
+          cout << indentStr << decl.second << endl;
+      }
+      cout << endl;
+      
+      // Generate operations in sequence
+      for (auto& operation : seqNode->operations) {
+          generateCode(operation, indent);
+      }
+      return;
+  }
 
   if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
     cout << indentStr << "for (int " << loopNode->loop_variable << " = 0; "
@@ -377,7 +455,6 @@ void generateCode(shared_ptr<IRNode> node, int indent = 0) {
   }
 }
 
-string generateTempName() { return "temp" + to_string(temp_counter++); }
 
 // Helper function to get unique loop variables from einsum notation
 set<char> getLoopVariables(const vector<string> &indexes) {
@@ -440,8 +517,74 @@ string generateEinsumCalc(const EinsumNode *einsum, const string &tempName) {
   return ss.str();
 }
 
+class IRGenerationContext {
+  private:
+      int temp_counter = 1;
+      
+  public:
+      shared_ptr<Tensor> generateTempTensor(int num_dims) {
+          string name = "temp" + to_string(temp_counter++);
+          auto tensor = make_shared<Tensor>(name, num_dims, true);  // dims inferred = true
+          return tensor;
+      }
+      
+      void reset() { temp_counter = 1; }
+  };
+
+// Function to compute result dimensions of any expression
+int getResultDimensions(shared_ptr<expr> node) {
+  if (auto tensor = dynamic_pointer_cast<Tensor>(node)) {
+      return tensor->num_dims;
+  }
+  
+  if (auto einsum = dynamic_pointer_cast<EinsumNode>(node)) {
+      // Count unique characters in output pattern
+      const string& outputPattern = einsum->indexes.back();
+      set<char> uniqueChars;
+      for (char c : outputPattern) {
+          uniqueChars.insert(c);
+      }
+      
+      int dims = uniqueChars.size();
+      
+      // TODO: Handle total contraction case (empty output pattern)
+      if (outputPattern.empty()) {
+          // This is a scalar result (total contraction)
+          // For now, treat as 0-dimensional
+          return 0;  // Could also return -1 to indicate scalar
+      }
+      
+      return dims;
+  }
+  
+  if (auto binop = dynamic_pointer_cast<BinOpNode>(node)) {
+      // For element-wise operations, result has same dimensions as operands
+      int leftDims = getResultDimensions(binop->inp1);
+      int rightDims = getResultDimensions(binop->inp2);
+      
+      // Verify dimensions match (they should after dimension inference)
+      if (leftDims != -1 && rightDims != -1 && leftDims != rightDims) {
+          throw runtime_error("Dimension mismatch in binary operation: " + 
+                            to_string(leftDims) + " vs " + to_string(rightDims));
+      }
+      
+      return (leftDims != -1) ? leftDims : rightDims;
+  }
+  
+  return -1;  // Unknown
+}
+
+// Helper to check if expression results in scalar (total contraction)
+bool isScalarResult(shared_ptr<expr> node) {
+  if (auto einsum = dynamic_pointer_cast<EinsumNode>(node)) {
+      return einsum->indexes.back().empty();  // Empty output pattern = scalar
+  }
+  return false;
+}
+
+
 // Helper function to convert einsum to nested loops
-shared_ptr<IRNode> convertEinsumToLoops(const EinsumNode *einsum, const string &tempName) {
+shared_ptr<IRNode> convertEinsumToLoops(const EinsumNode *einsum, const string &tempName, IRGenerationContext& ctx) {
 
   set<char> loopVars = getLoopVariables(einsum->indexes);
   vector<char> orderedVars(loopVars.begin(), loopVars.end());
@@ -485,75 +628,242 @@ shared_ptr<IRNode> convertEinsumToLoops(const EinsumNode *einsum, const string &
   return current;
 }
 
-shared_ptr<IRNode> convertASTtoIR(shared_ptr<expr> AST) {
-  // Handle EinsumNode
-  if (auto einsumPtr = dynamic_pointer_cast<EinsumNode>(AST)) {
-    string tempName = generateTempName();
-    return convertEinsumToLoops(einsumPtr.get(), tempName);
+// Helper function to convert BinOpKind to operator string
+string binOpToString(BinOpKind op) {
+  switch (op) {
+    case Add: return "+";
+    case Subtract: return "-";
+    case Multiply: return "*";
+    case Divide: return "/";
+    default: throw runtime_error("Unknown binary operation");
   }
+}
 
-  // Handle BinOpNode
-  if (auto binOpPtr = dynamic_pointer_cast<BinOpNode>(AST)) {
-    // Check if both operands are tensors (unimplemented case)
-    bool leftIsTensor = dynamic_pointer_cast<Tensor>(binOpPtr->inp1) != nullptr;
-    bool rightIsTensor =
-        dynamic_pointer_cast<Tensor>(binOpPtr->inp2) != nullptr;
+// Helper function to generate element-wise calculation code
+string generateElementwiseCalc(shared_ptr<Tensor> resultTensor, 
+                              shared_ptr<Tensor> leftTensor, 
+                              shared_ptr<Tensor> rightTensor, 
+                              BinOpKind op) {
+  stringstream ss;
+  
+  // Generate left side (result tensor access)
+  ss << resultTensor->name;
+  for (int i = 0; i < resultTensor->num_dims; i++) {
+    char loopVar = 'i' + i;  // i, j, k, l, ...
+    ss << "[" << loopVar << "]";
+  }
+  
+  ss << " = ";
+  
+  // Generate right side (left operand)
+  ss << leftTensor->name;
+  for (int i = 0; i < leftTensor->num_dims; i++) {
+    char loopVar = 'i' + i;  // i, j, k, l, ...
+    ss << "[" << loopVar << "]";
+  }
+  
+  ss << " " << binOpToString(op) << " ";
+  
+  // Generate right operand
+  ss << rightTensor->name;
+  for (int i = 0; i < rightTensor->num_dims; i++) {
+    char loopVar = 'i' + i;  // i, j, k, l, ...
+    ss << "[" << loopVar << "]";
+  }
+  
+  ss << ";";
+  return ss.str();
+}
 
-    if (leftIsTensor && rightIsTensor) {
-      throw runtime_error(
-          "Binary operations between two tensors not yet supported");
+// Function to generate element-wise operation loops
+shared_ptr<IRNode> generateElementwiseLoops(shared_ptr<Tensor> resultTensor,
+                                           shared_ptr<Tensor> leftTensor,
+                                           shared_ptr<Tensor> rightTensor,
+                                           BinOpKind op) {
+  
+  // Handle scalar case (0 dimensions)
+  if (resultTensor->num_dims == 0) {
+    return make_shared<CalcNode>(generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op));
+  }
+  
+  // Generate innermost calculation
+  shared_ptr<IRNode> innermost = make_shared<CalcNode>(
+    generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op)
+  );
+  
+  // Build nested loops from inside out (reverse order)
+  shared_ptr<IRNode> current = innermost;
+  
+  for (int dim = resultTensor->num_dims - 1; dim >= 0; dim--) {
+    char loopVar = 'i' + dim;  // i, j, k, l, ...
+    if (dim >= 26) loopVar = 'z'; // Fallback for many dimensions
+    
+    // Create shape variable using dimension source tracking
+    shared_ptr<Tensor> boundsTensor;
+    int boundsPosition;
+    
+    if (dim < resultTensor->dim_sources.size() && 
+        resultTensor->dim_sources[dim].source_tensor) {
+      // Use the tracked dimension source
+      boundsTensor = resultTensor->dim_sources[dim].source_tensor;
+      boundsPosition = resultTensor->dim_sources[dim].source_dim_index;
+    } else {
+      // Fallback: use left operand (they should have same dimensions)
+      boundsTensor = leftTensor;
+      boundsPosition = dim;
     }
+    
+    shape_variable shapeVar(boundsTensor, boundsPosition);
+    current = make_shared<LoopNode>(loopVar, shapeVar, current);
+  }
+  
+  return current;
+}
 
-    // Convert left operand
-    shared_ptr<IRNode> leftIR = convertASTtoIR(binOpPtr->inp1);
+string generateTensorDeclaration(shared_ptr<Tensor> tensor) {
+  if (tensor->num_dims == 0) {
+      // Scalar case (total contraction)
+      return "double " + tensor->name + ";";
+  }
+  
+  stringstream ss;
+  ss << "double " << tensor->name;
+  
+  for (int i = 0; i < tensor->num_dims; i++) {
+      ss << "[" << tensor->getDimensionRef(i) << "]";
+  }
+  
+  ss << ";";
+  return ss.str();
+}
 
-    // Handle case where right operand is a tensor
-    if (rightIsTensor) {
-      auto rightTensor = dynamic_pointer_cast<Tensor>(binOpPtr->inp2);
-      string tempName = generateTempName();
-
-      // Generate operation code
-      string opStr;
-      switch (binOpPtr->opn) {
-      case Add:
-        opStr = " + ";
-        break;
-      case Subtract:
-        opStr = " - ";
-        break;
-      case Multiply:
-        opStr = " * ";
-        break;
-      case Divide:
-        opStr = " / ";
-        break;
+shared_ptr<Tensor> createTempForEinsum(const EinsumNode* einsum, IRGenerationContext& ctx) {
+  const string& outputPattern = einsum->indexes.back();
+  
+  // Handle scalar case (total contraction)
+  if (outputPattern.empty()) {
+      // TODO: Handle scalar result properly
+      // For now, create a 0-dimensional tensor
+      auto temp = ctx.generateTempTensor(0);
+      // No dimension sources needed for scalar
+      return temp;
+  }
+  
+  // Create temp tensor with proper dimensions
+  int outputDims = getResultDimensions(make_shared<EinsumNode>(*einsum));
+  auto temp = ctx.generateTempTensor(outputDims);
+  
+  // Map each output dimension to its source
+  for (int out_dim = 0; out_dim < outputDims; out_dim++) {
+      char outputChar = outputPattern[out_dim];
+      
+      // Find which input tensor and dimension this character comes from
+      for (size_t inp_idx = 0; inp_idx < einsum->inputs.size(); inp_idx++) {
+          const string& inputPattern = einsum->indexes[inp_idx];
+          
+          for (size_t char_pos = 0; char_pos < inputPattern.size(); char_pos++) {
+              if (inputPattern[char_pos] == outputChar) {
+                  // Found the source: input tensor inp_idx, dimension char_pos
+                  temp->setDimensionSource(out_dim, einsum->inputs[inp_idx], char_pos);
+                  goto next_output_dim;  // Break out of nested loops
+              }
+          }
       }
+      next_output_dim:;
+  }
+  
+  return temp;
+}
 
-      // For now, create a simple calculation node
-      // This is a simplified implementation - in practice you'd need to handle
-      // the tensor dimensions properly
-      string calcCode =
-          tempName + " = prev_result" + opStr + rightTensor->name + ";";
-      shared_ptr<IRNode> calcNode = make_shared<CalcNode>(calcCode);
+shared_ptr<Tensor> processEinsum(const EinsumNode* einsum, shared_ptr<SequenceNode> sequence,  IRGenerationContext& ctx) {
 
-      return calcNode;
+    // Create temp tensor with dimension sources
+    auto tempTensor = createTempForEinsum(einsum, ctx);
+
+    // Generate temp declaration using dimension sources
+    string decl = generateTensorDeclaration(tempTensor);
+    sequence->addTempDeclaration(tempTensor->name, decl);
+
+    // Generate loops (can use dimension sources for bounds)
+    auto loops = convertEinsumToLoops(einsum, tempTensor->name, ctx);
+    sequence->addOperation(loops);
+
+    return tempTensor;
+}
+
+
+// Create temp tensor for BinOp result with dimension source tracking  
+shared_ptr<Tensor> createTempForBinOp(shared_ptr<Tensor> leftTensor, shared_ptr<Tensor> rightTensor, IRGenerationContext& ctx) {
+      
+    int dims = leftTensor->num_dims;  // Should match rightTensor->num_dims
+    auto temp = ctx.generateTempTensor(dims);
+
+    // For element-wise operations, each dimension comes from the same dimension of operands
+    // We can choose either left or right as source (they should have same dimensions)
+    for (int i = 0; i < dims; i++) {
+        // Use left operand as source - will have same dimension as output
+        if (i < leftTensor->dim_sources.size() && leftTensor->dim_sources[i].source_tensor) {
+        // Propagate from left operand's source
+          temp->setDimensionSource(i, 
+          leftTensor->dim_sources[i].source_tensor,
+          leftTensor->dim_sources[i].source_dim_index);
+        } else {
+          // Left operand is an original tensor
+          temp->setDimensionSource(i, leftTensor, i);
+        }
     }
 
-    // If right operand is not a tensor, convert it recursively
-    shared_ptr<IRNode> rightIR = convertASTtoIR(binOpPtr->inp2);
+    return temp;
+}
 
-    // For complex binary operations, you would need to combine the IRs
-    // This is a simplified version
-    return leftIR;
-  }
+shared_ptr<Tensor> processNode(shared_ptr<expr> node, shared_ptr<SequenceNode> sequence, IRGenerationContext& ctx);
 
-  // Handle Tensor (leaf node)
-  if (auto tensorPtr = dynamic_pointer_cast<Tensor>(AST)) {
-    // A single tensor doesn't generate loops, just return identity
-    return make_shared<CalcNode>("// Tensor: " + tensorPtr->name);
-  }
+shared_ptr<Tensor> processBinOp(const BinOpNode* binop, shared_ptr<SequenceNode> sequence, IRGenerationContext& ctx) {
 
-  throw runtime_error("Unknown AST node type");
+  // Process operands recursively
+  auto leftTensor = processNode(binop->inp1, sequence, ctx);
+  auto rightTensor = processNode(binop->inp2, sequence, ctx);
+  
+  // Create result temp with dimension tracking
+  auto resultTensor = createTempForBinOp(leftTensor, rightTensor, ctx);
+  
+  // Generate temp declaration
+  string decl = generateTensorDeclaration(resultTensor);
+  sequence->addTempDeclaration(resultTensor->name, decl);
+  
+  // Generate element-wise operation loops
+  auto loops = generateElementwiseLoops(resultTensor, leftTensor, rightTensor, binop->opn);
+  sequence->addOperation(loops);
+  
+  return resultTensor;
+}
+
+
+shared_ptr<Tensor> processNode(shared_ptr<expr> node, shared_ptr<SequenceNode> sequence, IRGenerationContext& ctx) {
+
+    if (auto tensor = dynamic_pointer_cast<Tensor>(node)) {
+        return tensor;  // Return original tensor directly
+    }
+    
+    if (auto einsum = dynamic_pointer_cast<EinsumNode>(node)) {
+        return processEinsum(einsum.get(), sequence, ctx);  // Return temp tensor
+    }
+    
+    if (auto binop = dynamic_pointer_cast<BinOpNode>(node)) {
+        return processBinOp(binop.get(), sequence, ctx);   // Return temp tensor
+    }
+    
+    throw runtime_error("Unknown AST node type");
+} 
+
+shared_ptr<SequenceNode> convertASTtoIR(shared_ptr<expr> AST, IRGenerationContext& ctx) {
+  /*
+  Sets up overarching sequence node and calls processnode, the main function traversing AST
+  */
+  auto sequence = make_shared<SequenceNode>();
+  auto resultTensor = processNode(AST, sequence, ctx);
+  sequence->setResultTemp(resultTensor->name);  // Extract name here
+  return sequence;
 }
 
 
@@ -680,7 +990,8 @@ int main(int argc, char *argv[]) {
         cout << endl;
     }
 
-    auto IR = convertASTtoIR(ast);
+    IRGenerationContext ctx; //helps keep track of temp variables while traversing AST tree
+    auto IR = convertASTtoIR(ast, ctx);
 
     if (debugMode) {
       cout << "=== IR Structure ===" << endl;
