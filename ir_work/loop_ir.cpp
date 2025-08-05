@@ -419,40 +419,108 @@ void printIR(shared_ptr<IRNode> node, int indent = 0) {
   }
 }
 // Generate C++ code from IR
-void generateCode(shared_ptr<IRNode> node, int indent = 0) {
-
+void generateCode(shared_ptr<IRNode> node, const string& resultTempName, int indent = 0) {
   if (!node)
-    return;
+      return;
 
   string indentStr(indent * 2, ' ');
-  
-  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
-      // Generate temp declarations first
-      cout << indentStr << "// Temporary variable declarations" << endl;
 
-      for (auto& decl : seqNode->temp_declarations) {
-          cout << indentStr << decl.second << endl;
-      }
-      cout << endl;
-      
-      // Generate operations in sequence
+  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+      // For nested sequence nodes, recurse with same substitution
       for (auto& operation : seqNode->operations) {
-          generateCode(operation, indent);
+          generateCode(operation, resultTempName, indent);
       }
       return;
   }
 
   if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
-    cout << indentStr << "for (int " << loopNode->loop_variable << " = 0; "
-         << loopNode->loop_variable << " < "
-         << loopNode->shape_var.tensor_name->name << ".shape["
-         << loopNode->shape_var.idx_posn << "]; " << loopNode->loop_variable
-         << "++) {" << endl;
-    generateCode(loopNode->body, indent + 1);
-    cout << indentStr << "}" << endl;
+      cout << indentStr << "for (int " << loopNode->loop_variable << " = 0; "
+           << loopNode->loop_variable << " < "
+           << loopNode->shape_var.tensor_name->name << ".shape["
+           << loopNode->shape_var.idx_posn << "]; " << loopNode->loop_variable
+           << "++) {" << endl;
+      generateCode(loopNode->body, resultTempName, indent + 1);
+      cout << indentStr << "}" << endl;
   } else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
-    cout << indentStr << calcNode->code_line << endl;
+      string codeLine = calcNode->code_line;
+      
+      // Replace result temp name with output.data
+      if (!resultTempName.empty()) {
+          size_t pos = 0;
+          while ((pos = codeLine.find(resultTempName, pos)) != string::npos) {
+              codeLine.replace(pos, resultTempName.length(), "output.data");
+              pos += strlen("output.data");
+          }
+      }
+      
+      cout << indentStr << codeLine << endl;
   }
+}
+
+// Helper function to generate kernel function signature
+void generateKernelSignature(shared_ptr<SequenceNode> sequence, const vector<string>& inputTensorNames) {
+  cout << "void kernel(";
+  
+  // Output parameter first
+  cout << "tetricks_tensor& __restrict__ output";
+  
+  // Input parameters
+  for (size_t i = 0; i < inputTensorNames.size(); i++) {
+      cout << ", const tetricks_tensor& __restrict__ " << inputTensorNames[i];
+  }
+  
+  cout << ") {" << endl;
+}
+void extractTensorNamesRecursive(shared_ptr<expr> ast, set<string>& names) {
+  if (auto tensor = dynamic_pointer_cast<Tensor>(ast)) {
+      // Only include original tensors (not generated temps)
+      if (!tensor->dims_inferred || tensor->name.find("temp") != 0) {
+          names.insert(tensor->name);
+      }
+  }
+  
+  if (auto binop = dynamic_pointer_cast<BinOpNode>(ast)) {
+      extractTensorNamesRecursive(binop->inp1, names);
+      extractTensorNamesRecursive(binop->inp2, names);
+  }
+  
+  if (auto einsum = dynamic_pointer_cast<EinsumNode>(ast)) {
+      for (auto& input : einsum->inputs) {
+          names.insert(input->name);
+      }
+  }
+}
+
+// Modified generateCode function to wrap in kernel function
+void generateKernelCode(shared_ptr<SequenceNode> sequence, const vector<string>& inputTensorNames) {
+  // Generate function signature
+  generateKernelSignature(sequence, inputTensorNames);
+  cout << endl;
+  
+  // Generate temp declarations
+  if (!sequence->temp_declarations.empty()) {
+      cout << "  // Temporary variable declarations" << endl;
+      for (auto& decl : sequence->temp_declarations) {
+          cout << "  " << decl.second << endl;
+      }
+      cout << endl;
+  }
+  
+  // Generate operations in sequence
+  for (auto& operation : sequence->operations) {
+    generateCode(operation, sequence->result_temp, 1);  // Start with indent level 1
+  }
+  
+  cout << "}" << endl;
+}
+
+// Helper function to extract input tensor names from AST
+vector<string> extractInputTensorNames(shared_ptr<expr> ast) {
+  set<string> uniqueNames;  // Use set to avoid duplicates
+  extractTensorNamesRecursive(ast, uniqueNames);
+  
+  vector<string> result(uniqueNames.begin(), uniqueNames.end());
+  return result;
 }
 
 
@@ -960,6 +1028,7 @@ shared_ptr<expr> parseExprFromJson(const json &j) {
 // MAIN FUNCTION
 // =============================================================================
 
+// Modified main function (replace the code generation part)
 int main(int argc, char *argv[]) {
   if (argc < 2) {
     cout << "Usage: " << argv[0] << " ast.json [-debug]" << endl;
@@ -981,16 +1050,19 @@ int main(int argc, char *argv[]) {
 
     auto ast = parseExprFromJson(astJson);
 
+    // Extract input tensor names for function signature
+    vector<string> inputTensorNames = extractInputTensorNames(ast);
+
     DimensionInferenceEngine dimEngine;
     dimEngine.inferAllDimensions(ast);
     
     if (debugMode) {
-        cout<<"=== Dimension inferred ==="<<endl;
+        cout << "=== Dimension inferred ===" << endl;
         dimEngine.printAllDimensions(ast);
         cout << endl;
     }
 
-    IRGenerationContext ctx; //helps keep track of temp variables while traversing AST tree
+    IRGenerationContext ctx;
     auto IR = convertASTtoIR(ast, ctx);
 
     if (debugMode) {
@@ -999,8 +1071,8 @@ int main(int argc, char *argv[]) {
       cout << endl;
     }
 
-    cout << "=== Generated Code ===" << endl;
-    generateCode(IR);
+    cout << "=== Generated Kernel ===" << endl;
+    generateKernelCode(IR, inputTensorNames);
     cout << endl;
 
   } catch (const exception &e) {
