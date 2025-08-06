@@ -1,15 +1,15 @@
 /*
-Program that takes in AST and builds loops
+Code generating C compiler. Reads AST from JSON format, lowers to loop IR, optimises and generates code.
 */
 #include <iostream>
 #include <memory>
 #include <set>
 #include <map>
-#include <unordered_map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
 using namespace std;
 
 #include <fstream>
@@ -20,7 +20,7 @@ using json = nlohmann::json;
 enum BinOpKind { Add, Subtract, Multiply, Divide };
 
 
-//forr reading from json
+//for reading from json
 BinOpKind parseBinOpKind(const string &opStr) {
   if (opStr == "Add") return Add;
   if (opStr == "Subtract") return Subtract;
@@ -48,15 +48,13 @@ struct Tensor : expr {
       int source_dim_index;
       
       DimensionSource() = default;
-      DimensionSource(shared_ptr<Tensor> tensor, int dim) 
-          : source_tensor(tensor), source_dim_index(dim) {}
+      DimensionSource(shared_ptr<Tensor> tensor, int dim): source_tensor(tensor), source_dim_index(dim) {}
   };
   
   vector<DimensionSource> dim_sources;  // One per dimension
   
   Tensor(const string &n) : name(n) {}
-  Tensor(const string &n, int dims, bool inferred = false) 
-      : name(n), num_dims(dims), dims_inferred(inferred) {
+  Tensor(const string &n, int dims, bool inferred = false): name(n), num_dims(dims), dims_inferred(inferred) {
       dim_sources.resize(dims);  // Initialize empty sources
   }
   
@@ -82,9 +80,7 @@ struct Tensor : expr {
 
 struct EinsumNode : expr {
   /*
-  indexes; list of einsum indices: Eg: einsum("ij,jk,kl -> il" , A,B,C) would
-  return an EinsumNode object with indices string "ij","jk","ik","il" inputs:
-  list of tensor objects to be operated on.
+  indexes;
   */
   vector<string> indexes;
   vector<shared_ptr<Tensor>> inputs; 
@@ -315,8 +311,7 @@ struct shape_variable {
   */
   shared_ptr<Tensor> tensor_name;
   int idx_posn;
-  shape_variable(const shared_ptr<Tensor> t_name, int pos)
-      : tensor_name(t_name), idx_posn(pos) {}
+  shape_variable(const shared_ptr<Tensor> t_name, int pos): tensor_name(t_name), idx_posn(pos) {}
 };
 
 struct IRNode {
@@ -338,15 +333,20 @@ struct CalcNode : IRNode {
 struct LoopNode : IRNode {
   /*
   Loop IR for loops to implement operations.
-  EinsumNode("ij","ji",A) would have LoopNode(i, A[0], LoopNode(j,A[1],
-  Calcnode(temp1[j][i] = A[i][j]) )) BinOpNode(Multiply, A,B) would have
-  LoopNode()
+  EinsumNode("ij->ji",A) would have LoopNode(i, A[0], LoopNode(j,A[1],
+  Calcnode(temp1[j][i] = A[i][j]) ))
   */
   char loop_variable;
   shape_variable shape_var;
+  int start = 0;
+  int increment = 1;
+  int end_offset = 0;
   shared_ptr<IRNode> body;
-  LoopNode(char var, const shape_variable &shape, shared_ptr<IRNode> b)
-      : loop_variable(var), shape_var(shape), body(b) {}
+
+  LoopNode(char var, const shape_variable &shape, shared_ptr<IRNode> b): loop_variable(var), shape_var(shape), body(b) {}
+
+  //constructor to be used by loop unrolling pass
+  LoopNode(char var, const shape_variable &shape, shared_ptr<IRNode> b, int start_val, int increment_val, int end_offset_val): loop_variable(var), shape_var(shape), body(b),start(start_val),increment(increment_val),end_offset(end_offset_val) {}
 };
 
 struct SequenceNode : IRNode {
@@ -367,7 +367,7 @@ struct SequenceNode : IRNode {
   void setResultTemp(const string& temp) {
       result_temp = temp;
   }
-};;
+};
 
 // Print IR structure (abstract representation for debugging)
 void printIR(shared_ptr<IRNode> node, int indent = 0) {
@@ -419,42 +419,65 @@ void printIR(shared_ptr<IRNode> node, int indent = 0) {
   }
 }
 // Generate C++ code from IR
-void generateCode(shared_ptr<IRNode> node, const string& resultTempName, int indent = 0) {
-  if (!node)
-      return;
+void generateCode(shared_ptr<IRNode> node, const string& resultTempName, int indent = 0, int unrollFactor = 1) {
+  
+    if (!node)
+        return;
 
-  string indentStr(indent * 2, ' ');
+    string indentStr(indent * 2, ' ');
 
-  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
-      // For nested sequence nodes, recurse with same substitution
-      for (auto& operation : seqNode->operations) {
-          generateCode(operation, resultTempName, indent);
-      }
-      return;
-  }
+    if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+        // For nested sequence nodes, recurse with same substitution
+        for (auto& operation : seqNode->operations) {
+            generateCode(operation, resultTempName, indent);
+        }
+        return;
+    }
 
-  if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
-      cout << indentStr << "for (int " << loopNode->loop_variable << " = 0; "
-           << loopNode->loop_variable << " < "
-           << loopNode->shape_var.tensor_name->name << ".shape["
-           << loopNode->shape_var.idx_posn << "]; " << loopNode->loop_variable
-           << "++) {" << endl;
-      generateCode(loopNode->body, resultTempName, indent + 1);
-      cout << indentStr << "}" << endl;
-  } else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
-      string codeLine = calcNode->code_line;
-      
-      // Replace result temp name with output.data
-      if (!resultTempName.empty()) {
-          size_t pos = 0;
-          while ((pos = codeLine.find(resultTempName, pos)) != string::npos) {
-              codeLine.replace(pos, resultTempName.length(), "output.data");
-              pos += strlen("output.data");
-          }
-      }
-      
-      cout << indentStr << codeLine << endl;
-  }
+    if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+
+        string shapeExpr = loopNode->shape_var.tensor_name->name + ".shape[" + to_string(loopNode->shape_var.idx_posn) + "]";
+        string loopVar = string(1, loopNode->loop_variable);
+
+        if (loopNode->start == 0 && loopNode->increment > 1) {
+            // Main unrolled loop
+            cout << indentStr << "for (int " << loopVar << " = 0; "
+                 << loopVar << " < " << shapeExpr << " - " << (loopNode->end_offset) << "; "
+                 << loopVar << " += " << loopNode->increment << ") {" << endl;
+            generateCode(loopNode->body, resultTempName, indent + 1, unrollFactor);
+            cout << indentStr << "}" << endl;
+        }
+        // Handle remainder loop
+        else if (loopNode->start == -1) {
+            // Remainder loop: start at N - (N % unrollFactor)
+            cout << indentStr << "for (int " << loopVar << " = " << shapeExpr << " - (" << shapeExpr << " % " << unrollFactor << "); "
+                 << loopVar << " < " << shapeExpr << "; "
+                 << loopVar << "++) {" << endl;
+            generateCode(loopNode->body, resultTempName, indent + 1, unrollFactor);
+            cout << indentStr << "}" << endl;
+        }
+        // Handle standard loop
+        else {
+            cout << indentStr << "for (int " << loopVar << " = " << loopNode->start << "; "
+                 << loopVar << " < " << shapeExpr << "; "
+                 << loopVar << " += " << loopNode->increment << ") {" << endl;
+            generateCode(loopNode->body, resultTempName, indent + 1, unrollFactor);
+            cout << indentStr << "}" << endl;
+        }
+    } else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+        string codeLine = calcNode->code_line;
+        
+        // Replace result temp name with output.data
+        if (!resultTempName.empty()) {
+            size_t pos = 0;
+            while ((pos = codeLine.find(resultTempName, pos)) != string::npos) {
+                codeLine.replace(pos, resultTempName.length(), "output.data");
+                pos += strlen("output.data");
+            }
+        }
+        
+        cout << indentStr << codeLine << endl;
+    }
 }
 
 // Helper function to generate kernel function signature
@@ -471,6 +494,7 @@ void generateKernelSignature(shared_ptr<SequenceNode> sequence, const vector<str
   
   cout << ") {" << endl;
 }
+
 void extractTensorNamesRecursive(shared_ptr<expr> ast, set<string>& names) {
   if (auto tensor = dynamic_pointer_cast<Tensor>(ast)) {
       // Only include original tensors (not generated temps)
@@ -491,71 +515,68 @@ void extractTensorNamesRecursive(shared_ptr<expr> ast, set<string>& names) {
   }
 }
 
-// Modified generateCode function to wrap in kernel function
-void generateKernelCode(shared_ptr<SequenceNode> sequence, const vector<string>& inputTensorNames) {
-  // Generate function signature
-  generateKernelSignature(sequence, inputTensorNames);
-  cout << endl;
-  
-  // Generate temp declarations
-  if (!sequence->temp_declarations.empty()) {
-      cout << "  // Temporary variable declarations" << endl;
-      for (auto& decl : sequence->temp_declarations) {
-          cout << "  " << decl.second << endl;
-      }
-      cout << endl;
-  }
-  
-  // Generate operations in sequence
-  for (auto& operation : sequence->operations) {
-    generateCode(operation, sequence->result_temp, 1);  // Start with indent level 1
-  }
-  
-  cout << "}" << endl;
+void generateKernelCode(shared_ptr<SequenceNode> sequence, const vector<string>& inputTensorNames, int unrollFactor = 1) {
+    // Generate function signature
+    generateKernelSignature(sequence, inputTensorNames);
+    cout << endl;
+    
+    // Generate temp declarations
+    if (!sequence->temp_declarations.empty()) {
+        cout << "  // Temporary variable declarations" << endl;
+        for (auto& decl : sequence->temp_declarations) {
+            cout << "  " << decl.second << endl;
+        }
+        cout << endl;
+    }
+    
+    // Generate operations in sequence
+    for (auto& operation : sequence->operations) {
+      generateCode(operation, sequence->result_temp, 1, unrollFactor);  // Start with indent level 1
+    }
+    
+    cout << "}" << endl;
 }
 
 // Helper function to extract input tensor names from AST
 vector<string> extractInputTensorNames(shared_ptr<expr> ast) {
-  set<string> uniqueNames;  // Use set to avoid duplicates
-  extractTensorNamesRecursive(ast, uniqueNames);
-  
-  vector<string> result(uniqueNames.begin(), uniqueNames.end());
-  return result;
+    set<string> uniqueNames;  // Use set to avoid duplicates
+    extractTensorNamesRecursive(ast, uniqueNames);
+    
+    vector<string> result(uniqueNames.begin(), uniqueNames.end());
+    return result;
 }
-
 
 // Helper function to get unique loop variables from einsum notation
 set<char> getLoopVariables(const vector<string> &indexes) {
-  set<char> variables;
-  // Get variables from input tensor indexes (all except last)
-  for (size_t i = 0; i < indexes.size() - 1; i++) {
-    for (char c : indexes[i]) {
-      variables.insert(c);
+    set<char> variables;
+    // Get variables from input tensor indexes (all except last)
+    for (size_t i = 0; i < indexes.size() - 1; i++) {
+      for (char c : indexes[i]) {
+        variables.insert(c);
+      }
     }
-  }
-  return variables;
+    return variables;
 }
 
 // Helper function to find position of character in string
 int findPosition(const string &str, char c) {
-  for (size_t i = 0; i < str.size(); i++) {
-    if (str[i] == c) {
-      return i;
+    for (size_t i = 0; i < str.size(); i++) {
+      if (str[i] == c) {
+        return i;
+      }
     }
-  }
-  return -1; // not found
+    return -1; // not found
 }
 
 // Helper function to generate tensor access string
-string generateTensorAccess(const string &tensorName,
-                            const string &indexPattern,
-                            const vector<char> &loopVars) {
-  stringstream ss;
-  ss << tensorName;
-  for (char indexChar : indexPattern) {
-    ss << "[" << indexChar << "]";
-  }
-  return ss.str();
+string generateTensorAccess(const string &tensorName, const string &indexPattern, const vector<char> &loopVars) {
+
+    stringstream ss;
+    ss << tensorName;
+    for (char indexChar : indexPattern) {
+      ss << "[" << indexChar << "]";
+    }
+    return ss.str();
 }
 
 // Helper function to generate calculation code for einsum
@@ -564,25 +585,25 @@ string generateEinsumCalc(const EinsumNode *einsum, const string &tempName) {
 
   // Generate left side (output tensor access)
   string outputIndex = einsum->indexes.back(); // last index is output
-  ss << tempName;
-  if (!outputIndex.empty()) { // checking for cases where output contracts to a single variable
-    for (char c : outputIndex) {
-      ss << "[" << c << "]";
+    ss << tempName;
+    if (!outputIndex.empty()) { // checking for cases where output contracts to a single variable
+      for (char c : outputIndex) {
+        ss << "[" << c << "]";
+      }
     }
-  }
-  
+    
 
-  ss << " += ";
+    ss << " += ";
 
-  // Generate right side (multiplication of all input tensors)
-  for (size_t i = 0; i < einsum->inputs.size(); i++) {
-    if (i > 0)
-      ss << " * ";
-    ss << generateTensorAccess(einsum->inputs[i]->name, einsum->indexes[i], {});
-  }
+    // Generate right side (multiplication of all input tensors)
+    for (size_t i = 0; i < einsum->inputs.size(); i++) {
+      if (i > 0)
+        ss << " * ";
+      ss << generateTensorAccess(einsum->inputs[i]->name, einsum->indexes[i], {});
+    }
 
-  ss << ";";
-  return ss.str();
+    ss << ";";
+    return ss.str();
 }
 
 class IRGenerationContext {
@@ -650,7 +671,6 @@ bool isScalarResult(shared_ptr<expr> node) {
   return false;
 }
 
-
 // Helper function to convert einsum to nested loops
 shared_ptr<IRNode> convertEinsumToLoops(const EinsumNode *einsum, const string &tempName, IRGenerationContext& ctx) {
 
@@ -708,87 +728,82 @@ string binOpToString(BinOpKind op) {
 }
 
 // Helper function to generate element-wise calculation code
-string generateElementwiseCalc(shared_ptr<Tensor> resultTensor, 
-                              shared_ptr<Tensor> leftTensor, 
-                              shared_ptr<Tensor> rightTensor, 
-                              BinOpKind op) {
-  stringstream ss;
-  
-  // Generate left side (result tensor access)
-  ss << resultTensor->name;
-  for (int i = 0; i < resultTensor->num_dims; i++) {
-    char loopVar = 'i' + i;  // i, j, k, l, ...
-    ss << "[" << loopVar << "]";
-  }
-  
-  ss << " = ";
-  
-  // Generate right side (left operand)
-  ss << leftTensor->name;
-  for (int i = 0; i < leftTensor->num_dims; i++) {
-    char loopVar = 'i' + i;  // i, j, k, l, ...
-    ss << "[" << loopVar << "]";
-  }
-  
-  ss << " " << binOpToString(op) << " ";
-  
-  // Generate right operand
-  ss << rightTensor->name;
-  for (int i = 0; i < rightTensor->num_dims; i++) {
-    char loopVar = 'i' + i;  // i, j, k, l, ...
-    ss << "[" << loopVar << "]";
-  }
-  
-  ss << ";";
-  return ss.str();
+string generateElementwiseCalc(shared_ptr<Tensor> resultTensor, shared_ptr<Tensor> leftTensor, shared_ptr<Tensor> rightTensor, BinOpKind op) {
+
+    stringstream ss;
+    // Generate left side (result tensor access)
+    ss << resultTensor->name;
+    for (int i = 0; i < resultTensor->num_dims; i++) {
+      char loopVar = 'i' + i;  // i, j, k, l, ...
+      ss << "[" << loopVar << "]";
+    }
+    
+    ss << " = ";
+    
+    // Generate right side (left operand)
+    ss << leftTensor->name;
+    for (int i = 0; i < leftTensor->num_dims; i++) {
+      char loopVar = 'i' + i;  // i, j, k, l, ...
+      ss << "[" << loopVar << "]";
+    }
+    
+    ss << " " << binOpToString(op) << " ";
+    
+    // Generate right operand
+    ss << rightTensor->name;
+    for (int i = 0; i < rightTensor->num_dims; i++) {
+      char loopVar = 'i' + i;  // i, j, k, l, ...
+      ss << "[" << loopVar << "]";
+    }
+    
+    ss << ";";
+    return ss.str();
 }
 
 // Function to generate element-wise operation loops
-shared_ptr<IRNode> generateElementwiseLoops(shared_ptr<Tensor> resultTensor,
-                                           shared_ptr<Tensor> leftTensor,
-                                           shared_ptr<Tensor> rightTensor,
-                                           BinOpKind op) {
+shared_ptr<IRNode> generateElementwiseLoops(shared_ptr<Tensor> resultTensor, shared_ptr<Tensor> leftTensor,shared_ptr<Tensor> rightTensor, BinOpKind op) {
   
-  // Handle scalar case (0 dimensions)
-  if (resultTensor->num_dims == 0) {
-    return make_shared<CalcNode>(generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op));
-  }
-  
-  // Generate innermost calculation
-  shared_ptr<IRNode> innermost = make_shared<CalcNode>(
-    generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op)
-  );
-  
-  // Build nested loops from inside out (reverse order)
-  shared_ptr<IRNode> current = innermost;
-  
-  for (int dim = resultTensor->num_dims - 1; dim >= 0; dim--) {
-    char loopVar = 'i' + dim;  // i, j, k, l, ...
-    if (dim >= 26) loopVar = 'z'; // Fallback for many dimensions
-    
-    // Create shape variable using dimension source tracking
-    shared_ptr<Tensor> boundsTensor;
-    int boundsPosition;
-    
-    if (dim < resultTensor->dim_sources.size() && 
-        resultTensor->dim_sources[dim].source_tensor) {
-      // Use the tracked dimension source
-      boundsTensor = resultTensor->dim_sources[dim].source_tensor;
-      boundsPosition = resultTensor->dim_sources[dim].source_dim_index;
-    } else {
-      // Fallback: use left operand (they should have same dimensions)
-      boundsTensor = leftTensor;
-      boundsPosition = dim;
+    // Handle scalar case (0 dimensions)
+    if (resultTensor->num_dims == 0) {
+      return make_shared<CalcNode>(generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op));
     }
     
-    shape_variable shapeVar(boundsTensor, boundsPosition);
-    current = make_shared<LoopNode>(loopVar, shapeVar, current);
-  }
-  
-  return current;
+    // Generate innermost calculation
+    shared_ptr<IRNode> innermost = make_shared<CalcNode>(
+      generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op)
+    );
+    
+    // Build nested loops from inside out (reverse order)
+    shared_ptr<IRNode> current = innermost;
+    
+    for (int dim = resultTensor->num_dims - 1; dim >= 0; dim--) {
+      char loopVar = 'i' + dim;  // i, j, k, l, ...
+      if (dim >= 26) loopVar = 'z'; // Fallback for many dimensions
+      
+      // Create shape variable using dimension source tracking
+      shared_ptr<Tensor> boundsTensor;
+      int boundsPosition;
+      
+      if (dim < resultTensor->dim_sources.size() && 
+          resultTensor->dim_sources[dim].source_tensor) {
+        // Use the tracked dimension source
+        boundsTensor = resultTensor->dim_sources[dim].source_tensor;
+        boundsPosition = resultTensor->dim_sources[dim].source_dim_index;
+      } else {
+        // Fallback: use left operand (they should have same dimensions)
+        boundsTensor = leftTensor;
+        boundsPosition = dim;
+      }
+      
+      shape_variable shapeVar(boundsTensor, boundsPosition);
+      current = make_shared<LoopNode>(loopVar, shapeVar, current);
+    }
+    
+    return current;
 }
 
 string generateTensorDeclaration(shared_ptr<Tensor> tensor) {
+
   if (tensor->num_dims == 0) {
       // Scalar case (total contraction)
       return "double " + tensor->name + ";";
@@ -806,6 +821,7 @@ string generateTensorDeclaration(shared_ptr<Tensor> tensor) {
 }
 
 shared_ptr<Tensor> createTempForEinsum(const EinsumNode* einsum, IRGenerationContext& ctx) {
+
   const string& outputPattern = einsum->indexes.back();
   
   // Handle scalar case (total contraction)
@@ -1025,18 +1041,461 @@ shared_ptr<expr> parseExprFromJson(const json &j) {
 }
 
 // =============================================================================
+// OPTIMISATIONS
+// =============================================================================
+
+// Loop Optimization Infrastructure
+struct Dependencies {
+  set<string> reads;   // Variables/tensors read (e.g., "A.data", "temp1")
+  set<string> writes;  // Variables/tensors written (e.g., "temp1", "output.data")
+};
+
+// Helper function to detect if a LoopNode has been unrolled
+bool isUnrolledLoop(LoopNode* loop) {
+  // Check if the body is a SequenceNode with multiple similar operations
+  if (auto bodySeq = dynamic_pointer_cast<SequenceNode>(loop->body)) {
+      return bodySeq->operations.size() > 1;
+  }
+  return false;
+}
+
+// Modified code generation for unrolled loops
+void generateUnrolledLoopCode(LoopNode* loop, int indent = 0) {
+  string indentStr(indent * 2, ' ');
+  
+  if (auto bodySeq = dynamic_pointer_cast<SequenceNode>(loop->body)) {
+      int unrollFactor = bodySeq->operations.size();
+      
+      cout << indentStr << "// Unrolled loop (factor: " << unrollFactor << ")" << endl;
+      cout << indentStr << "for (int " << loop->loop_variable << " = 0; "
+           << loop->loop_variable << " < " 
+           << loop->shape_var.tensor_name->name << ".shape["
+           << loop->shape_var.idx_posn << "] - " << (unrollFactor - 1) << "; "
+           << loop->loop_variable << " += " << unrollFactor << ") {" << endl;
+      
+      // Generate unrolled body
+      for (auto& operation : bodySeq->operations) {
+          generateCode(operation, "", indent + 1);
+      }
+      
+      cout << indentStr << "}" << endl;
+      
+      // Generate remainder loop for leftover iterations
+      cout << indentStr << "// Remainder loop" << endl;
+      cout << indentStr << "for (int " << loop->loop_variable << " = " 
+           << loop->shape_var.tensor_name->name << ".shape["
+           << loop->shape_var.idx_posn << "] - (" 
+           << loop->shape_var.tensor_name->name << ".shape["
+           << loop->shape_var.idx_posn << "] % " << unrollFactor << "); "
+           << loop->loop_variable << " < "
+           << loop->shape_var.tensor_name->name << ".shape["
+           << loop->shape_var.idx_posn << "]; "
+           << loop->loop_variable << "++) {" << endl;
+      
+      // Generate original body for remainder
+      if (!bodySeq->operations.empty()) {
+          // Use first operation as template, but remove the offset
+          auto firstOp = bodySeq->operations[0];
+          if (auto calcNode = dynamic_pointer_cast<CalcNode>(firstOp)) {
+              string originalCode = calcNode->code_line;
+              // Remove any "+ 0" patterns that might exist
+              size_t pos = originalCode.find(" + 0");
+              while (pos != string::npos) {
+                  originalCode.erase(pos, 4);
+                  pos = originalCode.find(" + 0", pos);
+              }
+              // Remove parentheses around single variables
+              pos = originalCode.find("(" + string(1, loop->loop_variable) + ")");
+              while (pos != string::npos) {
+                  originalCode.replace(pos, 3, string(1, loop->loop_variable));
+                  pos = originalCode.find("(" + string(1, loop->loop_variable) + ")", pos);
+              }
+              
+              cout << indentStr << "  " << originalCode << endl;
+          }
+      }
+      
+      cout << indentStr << "}" << endl;
+  }
+};
+
+// Helper to extract base variable name (e.g., "temp1[i][j]" -> "temp1")
+string extractBaseVariable(const string& expr) {
+  string trimmed = expr;
+  
+  // Remove whitespace
+  trimmed.erase(remove_if(trimmed.begin(), trimmed.end(), ::isspace), trimmed.end());
+  
+  // Find first '[' or end of string
+  size_t bracketPos = trimmed.find('[');
+  if (bracketPos != string::npos) {
+      return trimmed.substr(0, bracketPos);
+  }
+  
+  return trimmed;
+}
+
+// Helper to extract all variable names from an expression
+void extractVariablesFromExpression(const string& expr, set<string>& variables) {
+  // Simple approach: look for patterns like "word.word" or "word"
+  // followed by optional array indices [...]
+  
+  size_t pos = 0;
+  while (pos < expr.length()) {
+      // Skip non-alphabetic characters
+      while (pos < expr.length() && !isalpha(expr[pos])) {
+          pos++;
+      }
+      
+      if (pos >= expr.length()) break;
+      
+      // Extract variable name (letters, digits, dots, underscores)
+      string varName;
+      while (pos < expr.length() && 
+             (isalnum(expr[pos]) || expr[pos] == '.' || expr[pos] == '_')) {
+          varName += expr[pos];
+          pos++;
+      }
+      
+      // Skip array indices [...]
+      while (pos < expr.length() && expr[pos] == '[') {
+          int bracketCount = 1;
+          pos++; // Skip opening '['
+          while (pos < expr.length() && bracketCount > 0) {
+              if (expr[pos] == '[') bracketCount++;
+              if (expr[pos] == ']') bracketCount--;
+              pos++;
+          }
+      }
+      
+      if (!varName.empty()) {
+          variables.insert(varName);
+      }
+  }
+}
+
+// Parse CalcNode code to extract variable dependencies
+Dependencies analyzeDependencies(CalcNode* calc) {
+  Dependencies deps;
+  string code = calc->code_line;
+  
+  // Check for compound assignment operators (+=, -=, *=, /=)
+  bool isCompoundAssignment = false;
+  size_t assignPos = code.find("+=");
+  if (assignPos == string::npos) {
+      assignPos = code.find("-=");
+  }
+  if (assignPos == string::npos) {
+      assignPos = code.find("*=");
+  }
+  if (assignPos == string::npos) {
+      assignPos = code.find("/=");
+  }
+  if (assignPos != string::npos) {
+      isCompoundAssignment = true;
+  } else {
+      // Look for regular assignment
+      assignPos = code.find('=');
+      if (assignPos == string::npos) {
+          return deps; // No assignment found
+      }
+  }
+  
+  string leftSide = code.substr(0, assignPos);
+  string rightSide = code.substr(assignPos + (isCompoundAssignment ? 2 : 1));
+  
+  // Extract write target from left side
+  string writeVar = extractBaseVariable(leftSide);
+  if (!writeVar.empty()) {
+      deps.writes.insert(writeVar);
+      
+      // For compound assignments, left side is also read
+      if (isCompoundAssignment) {
+          deps.reads.insert(writeVar);
+      }
+  }
+  
+  // Extract read variables from right side
+  extractVariablesFromExpression(rightSide, deps.reads);
+  
+  return deps;
+}
+
+// Check if two CalcNodes have data dependencies
+bool hasDependency(CalcNode* calc1, CalcNode* calc2) {
+  auto deps1 = analyzeDependencies(calc1);
+  auto deps2 = analyzeDependencies(calc2);
+  
+  // Check for any intersection between reads and writes
+  for (const string& write1 : deps1.writes) {
+      if (deps2.reads.find(write1) != deps2.reads.end()) {
+          return true; // RAW dependency: calc2 reads what calc1 writes
+      }
+  }
+  
+  for (const string& read1 : deps1.reads) {
+      if (deps2.writes.find(read1) != deps2.writes.end()) {
+          return true; // WAR dependency: calc2 writes what calc1 reads
+      }
+  }
+  
+  for (const string& write1 : deps1.writes) {
+      if (deps2.writes.find(write1) != deps2.writes.end()) {
+          return true; // WAW dependency: both write to same variable
+      }
+  }
+  
+  return false; // No dependencies found
+}
+
+// Helper to check if a node contains any child loops
+bool hasChildLoops(shared_ptr<IRNode> node) {
+  if (!node) return false;
+  
+  if (dynamic_pointer_cast<LoopNode>(node)) {
+      return true; // Found a child loop
+  }
+  
+  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+      // Check all operations in sequence
+      for (auto& operation : seqNode->operations) {
+          if (hasChildLoops(operation)) {
+              return true;
+          }
+      }
+  }
+  
+  return false; // No child loops found
+}
+
+void findInnermostLoopsRecursive(shared_ptr<IRNode> node, vector<LoopNode*>& innermostLoops) {
+  if (!node) return;
+  
+  if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+      // Check if this loop has any child loops
+      if (!hasChildLoops(loopNode->body)) {
+          innermostLoops.push_back(loopNode.get());
+      } else {
+          // Recurse into body to find deeper innermost loops
+          findInnermostLoopsRecursive(loopNode->body, innermostLoops);
+      }
+  } else if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+      // Recurse into all operations in sequence
+      for (auto& operation : seqNode->operations) {
+          findInnermostLoopsRecursive(operation, innermostLoops);
+      }
+  }
+  // CalcNode has no children, so nothing to do
+}
+
+// Find all innermost loops in the IR (loops with no child loops)
+vector<LoopNode*> findInnermostLoops(shared_ptr<IRNode> root) {
+  vector<LoopNode*> innermostLoops;
+  findInnermostLoopsRecursive(root, innermostLoops);
+  return innermostLoops;
+}
+
+// Find adjacent loops in a SequenceNode that might be candidates for fusion
+vector<pair<LoopNode*, LoopNode*>> findAdjacentLoopsInSequence(SequenceNode* seq) {
+  vector<pair<LoopNode*, LoopNode*>> adjacentPairs;
+  
+  for (size_t i = 0; i < seq->operations.size() - 1; i++) {
+      auto loop1 = dynamic_pointer_cast<LoopNode>(seq->operations[i]);
+      auto loop2 = dynamic_pointer_cast<LoopNode>(seq->operations[i + 1]);
+      
+      if (loop1 && loop2) {
+          adjacentPairs.push_back({loop1.get(), loop2.get()});
+      }
+  }
+  
+  return adjacentPairs;
+}
+
+// Loop Unrolling Optimizer
+class LoopUnrollOptimizer {
+public:
+  shared_ptr<IRNode> optimize(shared_ptr<IRNode> ir, int unrollFactor) {
+      if (unrollFactor <= 1) {
+          return ir; // No unrolling needed - Code should not reach here. should have been filtered away by main.
+      }
+      
+      return unrollNode(ir, unrollFactor);
+  }
+  
+private:
+
+  shared_ptr<IRNode> unrollNode(shared_ptr<IRNode> node, int unrollFactor) {
+
+      if (!node) return node; //defense in case some nullptr reaches here. Something very seriously wrong then.
+      
+      if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+          // Check if this is an innermost loop
+          if (!hasChildLoops(loopNode->body)) {
+              return unrollLoop(loopNode.get(), unrollFactor);
+          } else {
+              // Recurse into body for nested loops
+              auto newBody = unrollNode(loopNode->body, unrollFactor);
+              return make_shared<LoopNode>(loopNode->loop_variable, loopNode->shape_var, newBody);
+          }
+      } else if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+          // Create new sequence with unrolled operations
+          auto newSeq = make_shared<SequenceNode>();
+          newSeq->temp_declarations = seqNode->temp_declarations;
+          newSeq->result_temp = seqNode->result_temp;
+          
+          for (auto& operation : seqNode->operations) {
+              newSeq->addOperation(unrollNode(operation, unrollFactor));
+          }
+          
+          return newSeq;
+      } else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+          // CalcNode doesn't need unrolling modification at this level
+          return node;
+      }
+      
+      return node;
+  }
+  
+  shared_ptr<IRNode> unrollLoop(LoopNode* loop, int unrollFactor) {
+      // Simple unrolling: replicate the loop body unrollFactor times
+      // and adjust the loop bound accordingly
+      
+      char loopVar = loop->loop_variable;
+
+      auto seq = make_shared<SequenceNode>(); // to hold unrolled loop and reminder loop
+
+      auto unrolledBody = createUnrolledBody(loop->body, loopVar, unrollFactor);
+      auto mainLoop = make_shared<LoopNode>(loopVar, loop->shape_var, unrolledBody, 0, unrollFactor, unrollFactor - 1);
+      seq->addOperation(mainLoop);
+
+      auto remainderBody = loop->body;// body of original loop for reminder loop
+      auto remainderLoop = make_shared<LoopNode>(loopVar, loop->shape_var, remainderBody, -1, 1, 0); // "-1" for loop start variable as a placeholder, will be handled at codegen as a special case for reminder loops.
+      seq->addOperation(remainderLoop);
+      return seq;
+
+  }
+  
+  shared_ptr<IRNode> createUnrolledBody(shared_ptr<IRNode> originalBody, char loopVar, int unrollFactor) {
+      auto bodySeq = make_shared<SequenceNode>();
+      
+      // Generate unrollFactor copies of the body with substituted loop variables
+      for (int i = 0; i < unrollFactor; i++) {
+          auto unrolledIteration = substituteLoopVariable(originalBody, loopVar, i);
+          bodySeq->addOperation(unrolledIteration);
+      }
+      
+      return bodySeq;
+  }
+  
+  shared_ptr<IRNode> substituteLoopVariable(shared_ptr<IRNode> node, char loopVar, int offset) {
+      if (!node) return node;
+      
+      if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+          // Substitute loop variable in the calculation
+          string newCode = calcNode->code_line;
+          string oldVar = string(1, loopVar);
+          string newVar = oldVar + " + " + to_string(offset);
+          
+          // Replace all occurrences of the loop variable
+          newCode = substituteLoopVarInString(newCode, oldVar, newVar);
+          
+          return make_shared<CalcNode>(newCode);
+      } else if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+          auto newSeq = make_shared<SequenceNode>();
+          newSeq->temp_declarations = seqNode->temp_declarations;
+          newSeq->result_temp = seqNode->result_temp;
+          
+          for (auto& operation : seqNode->operations) {
+              newSeq->addOperation(substituteLoopVariable(operation, loopVar, offset));
+          }
+          
+          return newSeq;
+      } else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+          // This shouldn't happen for innermost loops, but handle it
+          auto newBody = substituteLoopVariable(loopNode->body, loopVar, offset);
+          return make_shared<LoopNode>(loopNode->loop_variable, loopNode->shape_var, newBody);
+      }
+      
+      return node;
+  }
+  
+  string substituteLoopVarInString(const string& code, const string& oldVar, const string& newVar) {
+      string result = code;
+      size_t pos = 0;
+      
+      while ((pos = result.find(oldVar, pos)) != string::npos) {
+          // Check if this is a complete variable name (not part of a larger identifier)
+          bool isCompleteVar = true;
+          
+          // Check character before
+          if (pos > 0 && (isalnum(result[pos - 1]) || result[pos - 1] == '_')) {
+              isCompleteVar = false;
+          }
+          
+          // Check character after
+          if (pos + oldVar.length() < result.length() && 
+              (isalnum(result[pos + oldVar.length()]) || result[pos + oldVar.length()] == '_')) {
+              isCompleteVar = false;
+          }
+          
+          if (isCompleteVar) {
+              result.replace(pos, oldVar.length(), "(" + newVar + ")");
+              pos += newVar.length() + 2; // Account for added parentheses
+          } else {
+              pos += oldVar.length();
+          }
+      }
+      
+      return result;
+  }
+  
+  shared_ptr<IRNode> cloneIRNode(shared_ptr<IRNode> node) {
+      if (!node) return node;
+      
+      if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+          return make_shared<CalcNode>(calcNode->code_line);
+      } else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+          return make_shared<LoopNode>(loopNode->loop_variable, loopNode->shape_var, 
+                                     cloneIRNode(loopNode->body));
+      } else if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+          auto newSeq = make_shared<SequenceNode>();
+          newSeq->temp_declarations = seqNode->temp_declarations;
+          newSeq->result_temp = seqNode->result_temp;
+          
+          for (auto& operation : seqNode->operations) {
+              newSeq->addOperation(cloneIRNode(operation));
+          }
+          
+          return newSeq;
+      }
+      
+      return node;
+  }
+};
+
+// =============================================================================
 // MAIN FUNCTION
 // =============================================================================
 
 // Modified main function (replace the code generation part)
 int main(int argc, char *argv[]) {
   if (argc < 2) {
-    cout << "Usage: " << argv[0] << " ast.json [-debug]" << endl;
+    cout << "Usage: " << argv[0] << " ast.json [-debug] [-unroll N]" << endl;
     return 1;
   }
 
   string filename = argv[1];
-  bool debugMode = (argc >= 3 && string(argv[2]) == "-debug");
+  bool debugMode = false;
+  int unrollFactor = 1;
+
+  // Parse optional arguments
+  for (int i = 2; i < argc; ++i) {
+      if (string(argv[i]) == "-debug") debugMode = true;
+      if (string(argv[i]) == "-unroll" && i + 1 < argc) {
+          unrollFactor = stoi(argv[i + 1]);
+          ++i;
+      }
+  }
 
   ifstream inFile(filename);
   if (!inFile) {
@@ -1069,6 +1528,16 @@ int main(int argc, char *argv[]) {
       cout << "=== IR Structure ===" << endl;
       printIR(IR);
       cout << endl;
+    }
+
+    if (unrollFactor >1){
+        LoopUnrollOptimizer loopunroller;
+        IR = dynamic_pointer_cast<SequenceNode>(loopunroller.optimize(IR, unrollFactor));
+        if (debugMode){
+          cout << "=== IR after Loop Unrool ===" << endl;
+          printIR(IR);
+          cout<<endl;
+        }
     }
 
     cout << "=== Generated Kernel ===" << endl;
