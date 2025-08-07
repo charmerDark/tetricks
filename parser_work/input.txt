@@ -1,1 +1,0 @@
-einsum("ij,jk->ik",A,B) + einsum("ijklm ->im",C + D)  * D
