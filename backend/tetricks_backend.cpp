@@ -44,12 +44,14 @@ struct Tensor : expr {
   
   // Track which tensor/dimension determines each of our dimensions - mainly for temp variables generated in the process
   struct DimensionSource {
-      shared_ptr<Tensor> source_tensor;
-      int source_dim_index;
-      
-      DimensionSource() = default;
-      DimensionSource(shared_ptr<Tensor> tensor, int dim): source_tensor(tensor), source_dim_index(dim) {}
-  };
+    shared_ptr<Tensor> source_tensor;
+    int source_dim_index;
+    char loop_variable; 
+    DimensionSource() = default;
+    DimensionSource(shared_ptr<Tensor> tensor, int dim, char var)
+        : source_tensor(tensor), source_dim_index(dim), loop_variable(var) {}
+};
+
   
   vector<DimensionSource> dim_sources;  // One per dimension
   
@@ -59,11 +61,12 @@ struct Tensor : expr {
   }
   
   // Helper to set dimension source for intermediary temp tensors
-  void setDimensionSource(int our_dim, shared_ptr<Tensor> source_tensor, int source_dim) {
-      if (our_dim >= 0 && our_dim < dim_sources.size()) {
-          dim_sources[our_dim] = DimensionSource(source_tensor, source_dim);
-      }
-  }
+  void setDimensionSource(int our_dim, shared_ptr<Tensor> source_tensor, int source_dim, char loop_var) {
+    if (our_dim >= 0 && our_dim < dim_sources.size()) {
+        dim_sources[our_dim] = DimensionSource(source_tensor, source_dim, loop_var);
+    }
+}
+
   
   // Helper to get dimension reference for code generation
   string getDimensionRef(int dim_index) const {
@@ -673,48 +676,65 @@ bool isScalarResult(shared_ptr<expr> node) {
 
 // Helper function to convert einsum to nested loops
 shared_ptr<IRNode> convertEinsumToLoops(const EinsumNode *einsum, const string &tempName, IRGenerationContext& ctx) {
+    // 1. Identify output and contracted indices
+    const string& outputPattern = einsum->indexes.back();
+    set<char> outputIndices(outputPattern.begin(), outputPattern.end());
 
-  set<char> loopVars = getLoopVariables(einsum->indexes);
-  vector<char> orderedVars(loopVars.begin(), loopVars.end());
-
-  if (orderedVars.empty()) {
-    // No loops needed, just direct assignment
-    return make_shared<CalcNode>(generateEinsumCalc(einsum, tempName));
-  }
-
-  // Generate innermost calculation
-  shared_ptr<IRNode> innermost = make_shared<CalcNode>(generateEinsumCalc(einsum, tempName));
-
-  // Build nested loops from inside out
-  shared_ptr<IRNode> current = innermost;
-
-  for (int i = orderedVars.size() - 1; i >= 0; i--) {
-
-      char loopVar = orderedVars[i];
-      // Find a tensor that has this loop variable to determine bounds
-      shared_ptr<Tensor> boundsTensor = nullptr;
-      int boundsPosition = -1;
-
-      for (size_t j = 0; j < einsum->inputs.size(); j++) {
-        int pos = findPosition(einsum->indexes[j], loopVar);
-        if (pos != -1) {
-          boundsTensor = einsum->inputs[j];
-          boundsPosition = pos;
-          break;
+    // Collect all indices from input patterns
+    set<char> allIndices;
+    for (size_t i = 0; i < einsum->indexes.size() - 1; i++) {
+        for (char c : einsum->indexes[i]) {
+            allIndices.insert(c);
         }
-      }
+    }
 
-      if (boundsTensor == nullptr) {
-        throw runtime_error("Could not find bounds for loop variable: " +
-                            string(1, loopVar));
-      }
+    // Contracted indices = all - output
+    vector<char> contractedIndices;
+    for (char c : allIndices) {
+        if (outputIndices.find(c) == outputIndices.end()) {
+            contractedIndices.push_back(c);
+        }
+    }
 
-      shape_variable shapeVar(boundsTensor, boundsPosition);
-      current = make_shared<LoopNode>(loopVar, shapeVar, current);
-  }
+    // 2. Build ordered list: output indices (in outputPattern order), then contracted
+    vector<char> orderedVars;
+    for (char c : outputPattern) {
+        orderedVars.push_back(c);
+    }
+    for (char c : contractedIndices) {
+        orderedVars.push_back(c);
+    }
 
-  return current;
+    // 3. Build nested loops in this order
+    shared_ptr<IRNode> innermost = make_shared<CalcNode>(generateEinsumCalc(einsum, tempName));
+    shared_ptr<IRNode> current = innermost;
+
+    for (int i = orderedVars.size() - 1; i >= 0; i--) {
+        char loopVar = orderedVars[i];
+        // Find a tensor that has this loop variable to determine bounds
+        shared_ptr<Tensor> boundsTensor = nullptr;
+        int boundsPosition = -1;
+
+        for (size_t j = 0; j < einsum->inputs.size(); j++) {
+            int pos = findPosition(einsum->indexes[j], loopVar);
+            if (pos != -1) {
+                boundsTensor = einsum->inputs[j];
+                boundsPosition = pos;
+                break;
+            }
+        }
+
+        if (boundsTensor == nullptr) {
+            throw runtime_error("Could not find bounds for loop variable: " + string(1, loopVar));
+        }
+
+        shape_variable shapeVar(boundsTensor, boundsPosition);
+        current = make_shared<LoopNode>(loopVar, shapeVar, current);
+    }
+
+    return current;
 }
+
 
 // Helper function to convert BinOpKind to operator string
 string binOpToString(BinOpKind op) {
@@ -734,7 +754,14 @@ string generateElementwiseCalc(shared_ptr<Tensor> resultTensor, shared_ptr<Tenso
     // Generate left side (result tensor access)
     ss << resultTensor->name;
     for (int i = 0; i < resultTensor->num_dims; i++) {
-      char loopVar = 'i' + i;  // i, j, k, l, ...
+        char loopVar;
+
+        if (i < resultTensor->dim_sources.size() && resultTensor->dim_sources[i].loop_variable != '\0'){
+            loopVar = resultTensor->dim_sources[i].loop_variable;
+        } else {
+            loopVar = 'i' + i; //default if inference doesnt work - code should nto reach here ideally.
+        }
+
       ss << "[" << loopVar << "]";
     }
     
@@ -743,16 +770,26 @@ string generateElementwiseCalc(shared_ptr<Tensor> resultTensor, shared_ptr<Tenso
     // Generate right side (left operand)
     ss << leftTensor->name;
     for (int i = 0; i < leftTensor->num_dims; i++) {
-      char loopVar = 'i' + i;  // i, j, k, l, ...
-      ss << "[" << loopVar << "]";
+        char loopVar;
+        if (i < resultTensor->dim_sources.size() && 
+            resultTensor->dim_sources[i].loop_variable != '\0') {
+            loopVar = resultTensor->dim_sources[i].loop_variable;
+        } else {
+            loopVar = 'i' + i;
+        }
+        ss << "[" << loopVar << "]";
     }
-    
     ss << " " << binOpToString(op) << " ";
     
     // Generate right operand
     ss << rightTensor->name;
     for (int i = 0; i < rightTensor->num_dims; i++) {
-      char loopVar = 'i' + i;  // i, j, k, l, ...
+      char loopVar;
+      if (i < resultTensor->dim_sources.size() && resultTensor->dim_sources[i].loop_variable != '\0') {
+        loopVar = resultTensor->dim_sources[i].loop_variable;
+    } else {
+      loopVar = 'i' + i;
+    }
       ss << "[" << loopVar << "]";
     }
     
@@ -769,23 +806,27 @@ shared_ptr<IRNode> generateElementwiseLoops(shared_ptr<Tensor> resultTensor, sha
     }
     
     // Generate innermost calculation
-    shared_ptr<IRNode> innermost = make_shared<CalcNode>(
-      generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op)
+    shared_ptr<IRNode> innermost = make_shared<CalcNode>(generateElementwiseCalc(resultTensor, leftTensor, rightTensor, op)
     );
     
     // Build nested loops from inside out (reverse order)
     shared_ptr<IRNode> current = innermost;
     
     for (int dim = resultTensor->num_dims - 1; dim >= 0; dim--) {
-      char loopVar = 'i' + dim;  // i, j, k, l, ...
-      if (dim >= 26) loopVar = 'z'; // Fallback for many dimensions
+
+      char loopVar;
+      if (dim < resultTensor->dim_sources.size() && resultTensor->dim_sources[dim].loop_variable != '\0') {
+        loopVar = resultTensor->dim_sources[dim].loop_variable;
+      }
+      else {
+        loopVar = 'i' + dim;  // Fallback to default
+      }
       
       // Create shape variable using dimension source tracking
       shared_ptr<Tensor> boundsTensor;
       int boundsPosition;
       
-      if (dim < resultTensor->dim_sources.size() && 
-          resultTensor->dim_sources[dim].source_tensor) {
+      if (dim < resultTensor->dim_sources.size() && resultTensor->dim_sources[dim].source_tensor) {
         // Use the tracked dimension source
         boundsTensor = resultTensor->dim_sources[dim].source_tensor;
         boundsPosition = resultTensor->dim_sources[dim].source_dim_index;
@@ -826,8 +867,7 @@ shared_ptr<Tensor> createTempForEinsum(const EinsumNode* einsum, IRGenerationCon
   
   // Handle scalar case (total contraction)
   if (outputPattern.empty()) {
-      // TODO: Handle scalar result properly
-      // For now, create a 0-dimensional tensor
+      // For now, create a 0-dimensional tensor - actually seems to be a fair workaround, might not need furtherchanges
       auto temp = ctx.generateTempTensor(0);
       // No dimension sources needed for scalar
       return temp;
@@ -848,14 +888,13 @@ shared_ptr<Tensor> createTempForEinsum(const EinsumNode* einsum, IRGenerationCon
           for (size_t char_pos = 0; char_pos < inputPattern.size(); char_pos++) {
               if (inputPattern[char_pos] == outputChar) {
                   // Found the source: input tensor inp_idx, dimension char_pos
-                  temp->setDimensionSource(out_dim, einsum->inputs[inp_idx], char_pos);
+                  temp->setDimensionSource(out_dim, einsum->inputs[inp_idx], char_pos, outputChar);
                   goto next_output_dim;  // Break out of nested loops
               }
           }
       }
       next_output_dim:;
   }
-  
   return temp;
 }
 
@@ -877,23 +916,36 @@ shared_ptr<Tensor> processEinsum(const EinsumNode* einsum, shared_ptr<SequenceNo
 
 
 // Create temp tensor for BinOp result with dimension source tracking  
-shared_ptr<Tensor> createTempForBinOp(shared_ptr<Tensor> leftTensor, shared_ptr<Tensor> rightTensor, IRGenerationContext& ctx) {
+shared_ptr<Tensor> createTempForBinOp(shared_ptr<Tensor> leftTensor, shared_ptr<Tensor> rightTensor, IRGenerationContext& ctx) {  
       
-    int dims = leftTensor->num_dims;  // Should match rightTensor->num_dims
+    int dims = leftTensor->num_dims;  // Should match rightTensor->num_dims: users responsibilty
     auto temp = ctx.generateTempTensor(dims);
 
     // For element-wise operations, each dimension comes from the same dimension of operands
     // We can choose either left or right as source (they should have same dimensions)
     for (int i = 0; i < dims; i++) {
+        char inferredLoopVar = '\0';
         // Use left operand as source - will have same dimension as output
-        if (i < leftTensor->dim_sources.size() && leftTensor->dim_sources[i].source_tensor) {
+        if (i < leftTensor->dim_sources.size() && leftTensor->dim_sources[i].source_tensor && leftTensor->dim_sources[i].loop_variable != '\0') {
         // Propagate from left operand's source
           temp->setDimensionSource(i, 
           leftTensor->dim_sources[i].source_tensor,
-          leftTensor->dim_sources[i].source_dim_index);
-        } else {
-          // Left operand is an original tensor
-          temp->setDimensionSource(i, leftTensor, i);
+          leftTensor->dim_sources[i].source_dim_index,
+          inferredLoopVar);
+        }
+        else if (i < rightTensor->dim_sources.size() && rightTensor->dim_sources[i].source_tensor && rightTensor->dim_sources[i].loop_variable != '\0') {
+            // Right operand has loop variable from previous Einsum/BinOp
+            inferredLoopVar = rightTensor->dim_sources[i].loop_variable;
+            temp->setDimensionSource(i,rightTensor->dim_sources[i].source_tensor,rightTensor->dim_sources[i].source_dim_index,inferredLoopVar);
+        }
+        // Fallback: both operands are original tensors - use default mapping
+        else {
+            // Default loop variable assignment: i, j, k, l, ...
+            inferredLoopVar = 'i' + i;
+            if (i >= 26) inferredLoopVar = 'z'; // Fallback for many dimensions
+            //TODO: remove this hacky logic and add something more robust
+            // Use left operand as source tensor
+            temp->setDimensionSource(i, leftTensor, i, inferredLoopVar);
         }
     }
 
@@ -1777,8 +1829,8 @@ int main(int argc, char *argv[]) {
     }
 
     if (fusionEnabled){
-      LoopFusionOptimizer fusionOptimizer;
-      IR = dynamic_pointer_cast<SequenceNode>(fusionOptimizer.optimize(IR));
+      LoopFusionOptimizer loopfuser;
+      IR = dynamic_pointer_cast<SequenceNode>(loopfuser.optimize(IR));
       if (debugMode) {
           cout << "=== IR after Loop Fusion ===" << endl;
           printIR(IR);
@@ -1796,9 +1848,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (debugMode)
-    cout << "=== Generated Kernel ===" << endl;
-
+    if (debugMode){
+        cout << "=== Generated Kernel ===" << endl;
+    }
     generateKernelCode(IR, inputTensorNames);
     cout << endl;
 
