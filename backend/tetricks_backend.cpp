@@ -523,11 +523,13 @@ void generateKernelCode(shared_ptr<SequenceNode> sequence, const vector<string>&
     generateKernelSignature(sequence, inputTensorNames);
     cout << endl;
     
-    // Generate temp declarations
-    if (!sequence->temp_declarations.empty()) {
-        cout << "  // Temporary variable declarations" << endl;
-        for (auto& decl : sequence->temp_declarations) {
-            cout << "  " << decl.second << endl;
+    // Generate temp declarations - skip las temp declaration as it will be stored in result
+    auto it = sequence->temp_declarations.begin();
+    auto end = sequence->temp_declarations.end();
+    if (it != end) {
+        auto last = std::prev(end);
+        for (; it != last; ++it) {
+            std::cout << "  " << it->second << "= {}"<< std::endl;
         }
         cout << endl;
     }
@@ -928,6 +930,7 @@ shared_ptr<Tensor> createTempForBinOp(shared_ptr<Tensor> leftTensor, shared_ptr<
         // Use left operand as source - will have same dimension as output
         if (i < leftTensor->dim_sources.size() && leftTensor->dim_sources[i].source_tensor && leftTensor->dim_sources[i].loop_variable != '\0') {
         // Propagate from left operand's source
+        inferredLoopVar = leftTensor->dim_sources[i].loop_variable;
           temp->setDimensionSource(i, 
           leftTensor->dim_sources[i].source_tensor,
           leftTensor->dim_sources[i].source_dim_index,
