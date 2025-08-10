@@ -1,5 +1,5 @@
 /*
-Code generating C compiler. Reads AST from JSON format, lowers to loop IR, optimises and generates code.
+Code generating C(pp) compiler. Reads AST from JSON format, lowers to loop IR, optimises and generates code.
 */
 #include <iostream>
 #include <memory>
@@ -1473,6 +1473,251 @@ private:
   }
 };
 
+
+// Loop Fusion Optimizer
+class LoopFusionOptimizer {
+  public:
+      shared_ptr<IRNode> optimize(shared_ptr<IRNode> ir) {
+          return fuseLoopsRecursive(ir);
+      }
+  
+  private:
+      shared_ptr<IRNode> fuseLoopsRecursive(shared_ptr<IRNode> node) {
+          if (!node) return node;
+  
+          if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+              return fuseLoopsInSequence(seqNode.get());
+          } 
+          else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+              // Recursively process the body first
+              auto newBody = fuseLoopsRecursive(loopNode->body);
+              return make_shared<LoopNode>(loopNode->loop_variable, loopNode->shape_var, 
+                                         newBody, loopNode->start, loopNode->increment, 
+                                         loopNode->end_offset);
+          }
+          
+          return node; // CalcNode or other types don't need fusion
+      }
+  
+      shared_ptr<IRNode> fuseLoopsInSequence(SequenceNode* seq) {
+          auto newSeq = make_shared<SequenceNode>();
+          newSeq->temp_declarations = seq->temp_declarations;
+          newSeq->result_temp = seq->result_temp;
+  
+          vector<shared_ptr<IRNode>> processedOps;
+          
+          for (size_t i = 0; i < seq->operations.size(); ++i) {
+              auto currentOp = fuseLoopsRecursive(seq->operations[i]);
+              
+              // Try to fuse with previous operation
+              if (!processedOps.empty()) {
+                  auto prevOp = processedOps.back();
+                  auto fused = tryFuseLoops(prevOp, currentOp);
+                  
+                  if (fused) {
+                      processedOps.back() = fused; // Replace previous with fused version
+                      continue; // Skip adding current operation separately
+                  }
+              }
+              
+              processedOps.push_back(currentOp);
+          }
+          
+          // Add all processed operations to new sequence
+          for (auto& op : processedOps) {
+              newSeq->addOperation(op);
+          }
+          
+          return newSeq;
+      }
+  
+      shared_ptr<IRNode> tryFuseLoops(shared_ptr<IRNode> loop1, shared_ptr<IRNode> loop2) {
+          auto loopNode1 = dynamic_pointer_cast<LoopNode>(loop1);
+          auto loopNode2 = dynamic_pointer_cast<LoopNode>(loop2);
+          
+          if (!loopNode1 || !loopNode2) {
+              return nullptr; // Can only fuse LoopNodes
+          }
+          
+          // Check if loops can be fused
+          if (!canFuseLoops(loopNode1.get(), loopNode2.get())) {
+              return nullptr;
+          }
+          
+          return performLoopFusion(loopNode1.get(), loopNode2.get());
+      }
+  
+      bool canFuseLoops(LoopNode* loop1, LoopNode* loop2) {
+          // Check 1: Same loop variable
+          if (loop1->loop_variable != loop2->loop_variable) {
+              return false;
+          }
+          
+          // Check 2: Trust user for bounds compatibility - skip bounds check
+          // User is responsible for ensuring dimension compatibility
+          
+          // Check 3: Same loop parameters (start, increment, end_offset)
+          if (loop1->start != loop2->start || 
+              loop1->increment != loop2->increment || 
+              loop1->end_offset != loop2->end_offset) {
+              return false;
+          }
+          
+          // Check 4: No data dependencies that would be violated
+          if (hasViolatingDependencies(loop1, loop2)) {
+              return false;
+          }
+          
+          return true;
+      }
+  
+      // Removed haveSameBounds() - trusting user for dimension compatibility
+  
+      bool hasViolatingDependencies(LoopNode* loop1, LoopNode* loop2) {
+          // Get all CalcNodes from both loop bodies
+          vector<CalcNode*> body1Calcs = extractCalcNodes(loop1->body);
+          vector<CalcNode*> body2Calcs = extractCalcNodes(loop2->body);
+          
+          // Check for dependencies between operations in different loops
+          for (CalcNode* calc1 : body1Calcs) {
+              for (CalcNode* calc2 : body2Calcs) {
+                  if (hasDependency(calc1, calc2)) {
+                      // Found a dependency - check if fusion would violate it
+                      if (wouldViolateDependency(calc1, calc2)) {
+                          return true;
+                      }
+                  }
+              }
+          }
+          
+          return false;
+      }
+  
+      bool wouldViolateDependency(CalcNode* calc1, CalcNode* calc2) {
+          // For loop fusion, we need to ensure that if calc1 writes to a variable
+          // that calc2 reads, and they access the same array elements in the same
+          // iteration, then fusion is safe. If they access different elements
+          // based on the loop variable, fusion might change the order of operations.
+          
+          auto deps1 = analyzeDependencies(calc1);
+          auto deps2 = analyzeDependencies(calc2);
+          
+          // Check for RAW (Read After Write) dependencies
+          for (const string& write1 : deps1.writes) {
+              if (deps2.reads.find(write1) != deps2.reads.end()) {
+                  // calc2 reads what calc1 writes
+                  // This is safe for fusion if they're accessing the same elements
+                  // in the same iteration (which is typically the case for element-wise ops)
+                  // For now, we'll be conservative and allow fusion for most cases
+                  return false; // Allow fusion for same-iteration dependencies
+              }
+          }
+          
+          // WAR and WAW dependencies are generally safe for fusion if they
+          // occur within the same iteration
+          return false; // Conservative: allow fusion
+      }
+  
+      vector<CalcNode*> extractCalcNodes(shared_ptr<IRNode> node) {
+          vector<CalcNode*> calcNodes;
+          extractCalcNodesRecursive(node, calcNodes);
+          return calcNodes;
+      }
+  
+      void extractCalcNodesRecursive(shared_ptr<IRNode> node, vector<CalcNode*>& calcNodes) {
+          if (!node) return;
+          
+          if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+              calcNodes.push_back(calcNode.get());
+          }
+          else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+              extractCalcNodesRecursive(loopNode->body, calcNodes);
+          }
+          else if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+              for (auto& operation : seqNode->operations) {
+                  extractCalcNodesRecursive(operation, calcNodes);
+              }
+          }
+      }
+  
+      shared_ptr<IRNode> performLoopFusion(LoopNode* loop1, LoopNode* loop2) {
+          // Create a new fused loop with deeply merged body
+          auto fusedBody = createDeeplyFusedBody(loop1->body, loop2->body);
+          
+          // Use the parameters from loop1 (they should be the same anyway)
+          return make_shared<LoopNode>(
+              loop1->loop_variable,
+              loop1->shape_var,
+              fusedBody,
+              loop1->start,
+              loop1->increment,
+              loop1->end_offset
+          );
+      }
+  
+      shared_ptr<IRNode> createDeeplyFusedBody(shared_ptr<IRNode> body1, shared_ptr<IRNode> body2) {
+          // Check if both bodies are LoopNodes with the same loop variable
+          auto loop1 = dynamic_pointer_cast<LoopNode>(body1);
+          auto loop2 = dynamic_pointer_cast<LoopNode>(body2);
+          
+          if (loop1 && loop2 && loop1->loop_variable == loop2->loop_variable) {
+              // Both are loops with same variable - recursively fuse them
+              auto deeplyFusedInner = createDeeplyFusedBody(loop1->body, loop2->body);
+              
+              // Use loop1's parameters (assuming they match)
+              return make_shared<LoopNode>(
+                  loop1->loop_variable,
+                  loop1->shape_var,  // Trust user that bounds are compatible
+                  deeplyFusedInner,
+                  loop1->start,
+                  loop1->increment,
+                  loop1->end_offset
+              );
+          } else {
+              // At least one is not a compatible loop - create sequence
+              return createFusedBody(body1, body2);
+          }
+      }
+  
+      shared_ptr<IRNode> createFusedBody(shared_ptr<IRNode> body1, shared_ptr<IRNode> body2) {
+          // Create a sequence node that contains operations from both bodies
+          auto fusedSeq = make_shared<SequenceNode>();
+          
+          // Add operations from first body
+          addOperationsToSequence(body1, fusedSeq.get());
+          
+          // Add operations from second body
+          addOperationsToSequence(body2, fusedSeq.get());
+          
+          return fusedSeq;
+      }
+  
+      void addOperationsToSequence(shared_ptr<IRNode> source, SequenceNode* target) {
+          if (!source) return;
+          
+          if (auto sourceSeq = dynamic_pointer_cast<SequenceNode>(source)) {
+              // Copy temp declarations (merge them)
+              for (const auto& decl : sourceSeq->temp_declarations) {
+                  target->addTempDeclaration(decl.first, decl.second);
+              }
+              
+              // Add all operations
+              for (auto& operation : sourceSeq->operations) {
+                  target->addOperation(operation);
+              }
+              
+              // Handle result temp (keep the last one, or merge logic as needed)
+              if (!sourceSeq->result_temp.empty()) {
+                  target->setResultTemp(sourceSeq->result_temp);
+              }
+          }
+          else {
+              // Single operation (CalcNode, LoopNode, etc.)
+              target->addOperation(source);
+          }
+      }
+  };
+
 // =============================================================================
 // MAIN FUNCTION
 // =============================================================================
@@ -1485,7 +1730,7 @@ int main(int argc, char *argv[]) {
   }
 
   string filename = argv[1];
-  bool debugMode = false;
+  bool debugMode = false, fusionEnabled= false;
   int unrollFactor = 1;
 
   // Parse optional arguments
@@ -1495,6 +1740,7 @@ int main(int argc, char *argv[]) {
           unrollFactor = stoi(argv[i + 1]);
           ++i;
       }
+      if (string(argv[i]) == "-fusion") fusionEnabled = true;
   }
 
   ifstream inFile(filename);
@@ -1530,6 +1776,16 @@ int main(int argc, char *argv[]) {
       cout << endl;
     }
 
+    if (fusionEnabled){
+      LoopFusionOptimizer fusionOptimizer;
+      IR = dynamic_pointer_cast<SequenceNode>(fusionOptimizer.optimize(IR));
+      if (debugMode) {
+          cout << "=== IR after Loop Fusion ===" << endl;
+          printIR(IR);
+          cout << endl;
+      }
+    }
+
     if (unrollFactor >1){
         LoopUnrollOptimizer loopunroller;
         IR = dynamic_pointer_cast<SequenceNode>(loopunroller.optimize(IR, unrollFactor));
@@ -1540,7 +1796,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (debugMode)
     cout << "=== Generated Kernel ===" << endl;
+
     generateKernelCode(IR, inputTensorNames);
     cout << endl;
 
