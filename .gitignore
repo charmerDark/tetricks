@@ -2,7 +2,9 @@
 *.cmo
 *.mli
 *.o
-parser_work/_build/*
+frontend/_build/*
 *.dot
 *.ll
 *.bc
+frontend/input.txt
+frontend/tetricks_frontend

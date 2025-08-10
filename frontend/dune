@@ -1,0 +1,5 @@
+(executable
+ (name tetricks_frontend)
+ (modules ast parser lexer tetricks_frontend)
+ (libraries yojson)
+ (preprocess (pps ppx_deriving_yojson)))
