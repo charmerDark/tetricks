@@ -1,1 +1,1 @@
-clang++ -std=c++17 -o tetricks_backend loop_ir.cpp
+clang++ -std=c++17 -o tetricks_backend tetricks_backend.cpp

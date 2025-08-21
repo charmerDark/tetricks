@@ -3,5 +3,6 @@
 (using menhir 2.1)
 
 (package
- (name tetricks_parser)
+ (name tetricks_frontend)
+ (allow_empty)
  (depends ocaml dune menhir yojson ppx_deriving_yojson))
