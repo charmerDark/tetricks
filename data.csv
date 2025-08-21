@@ -1,0 +1,11 @@
+kernel name,naive code runtime,optimised code runtime
+dot product,32,8
+TTV,40,44
+TTM,46,34
+MTTKRP,55,41
+Batched_matmul,58,48
+Frobenius norm dif,180,94
+Stress Strain work,50,34
+BFM_DIFF,78,56
+FFWMN,225,156
+JVP_DIFF,171,98

@@ -1,0 +1,6 @@
+[
+  "BinOp",
+  [ "Add" ],
+  [ "Einsum", { "notation": "bi,ij->bj", "tensors": [ "X", "W1" ] } ],
+  [ "Einsum", { "notation": "bj,jk->bk", "tensors": [ "Y", "W2" ] } ]
+]

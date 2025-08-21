@@ -1780,7 +1780,7 @@ class LoopFusionOptimizer {
 // Modified main function (replace the code generation part)
 int main(int argc, char *argv[]) {
   if (argc < 2) {
-    cout << "Usage: " << argv[0] << " ast.json [-debug] [-unroll N]" << endl;
+    cout << "Usage: " << argv[0] << " ast.json [-debug] [-fusion] [-unroll N]" << endl;
     return 1;
   }
 

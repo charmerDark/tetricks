@@ -1,0 +1,9 @@
+Kernel,CGRA_Mapper,My_Mapper
+5 tensor product,8, 8
+8 tensor reduction,-,12
+9 tensor reduction,-,12
+Multidim reduction,7, 4
+TTM,6, 4
+TTV,6, 4
+Batched Matmul, 8, 4
+Stress Strain work,8, 4

@@ -8,3 +8,4 @@ frontend/_build/*
 *.bc
 frontend/input.txt
 frontend/tetricks_frontend
+backend/tetricks_backend

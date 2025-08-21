@@ -1,0 +1,6 @@
+[
+  "BinOp",
+  [ "Multiply" ],
+  [ "Einsum", { "notation": "ijkl->ij", "tensors": [ "A" ] } ],
+  [ "Einsum", { "notation": "i,j->ij", "tensors": [ "C", "D" ] } ]
+]
