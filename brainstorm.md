@@ -1,4 +1,10 @@
 
+# Mapper Expansion
+
+ - Must expand the CGRA Mapper to map calculations for multiple einsum expressions.
+ - Implement LICM to DSL/ Add a mapping IR that does LICM and then lowers to mapping.
+ - Map pointer arithmetic
+
 # CGRA Mapping function:
 
     ## what is the input
