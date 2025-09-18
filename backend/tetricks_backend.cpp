@@ -374,53 +374,51 @@ struct SequenceNode : IRNode {
 
 // Print IR structure (abstract representation for debugging)
 void printIR(shared_ptr<IRNode> node, int indent = 0) {
-  if (!node)
-    return;
+    if (!node)
+        return;
 
-  string indentStr(indent * 2, ' ');
+    string indentStr(indent * 2, ' ');
 
-  if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
-    cout << indentStr << "SequenceNode {" << endl;
-    
-    // Print temp declarations first (matches code generation order)
-    if (!seqNode->temp_declarations.empty()) {
-      cout << indentStr << "  // Temporary variable declarations" << endl;
-      for (const auto& decl : seqNode->temp_declarations) {
-        cout << indentStr << "  " << decl.second << endl;
-      }
-      cout << endl;
-    }
-    
-    // Print operations in sequence
-    if (!seqNode->operations.empty()) {
-      for (size_t i = 0; i < seqNode->operations.size(); i++) {
-        printIR(seqNode->operations[i], indent + 1);
-        if (i < seqNode->operations.size() - 1) {
-          cout << endl; // Add spacing between operations
+    if (auto seqNode = dynamic_pointer_cast<SequenceNode>(node)) {
+        cout << indentStr << "SequenceNode {" << endl;
+
+        // Print temp declarations (as code, not as comments)
+        for (const auto& decl : seqNode->temp_declarations) {
+            cout << indentStr << "  " << decl.second << endl;
         }
-      }
+        if (!seqNode->temp_declarations.empty())
+            cout << endl;
+
+        // Print operations in sequence
+        for (size_t i = 0; i < seqNode->operations.size(); i++) {
+            printIR(seqNode->operations[i], indent + 1);
+        }
+
+        // Print result info at the end
+        if (!seqNode->result_temp.empty()) {
+            cout << endl << indentStr << "  // Result stored in: " << seqNode->result_temp << endl;
+        }
+
+        cout << indentStr << "}" << endl;
     }
-    
-    // Print result info at the end
-    if (!seqNode->result_temp.empty()) {
-      cout << endl << indentStr << "  // Result stored in: " << seqNode->result_temp << endl;
+    else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
+        cout << indentStr << "LoopNode {" << endl;
+        cout << indentStr << "  variable: '" << loopNode->loop_variable << "'" << endl;
+        cout << indentStr << "  shape_var: " << loopNode->shape_var.tensor_name->name
+             << ".shape[" << loopNode->shape_var.idx_posn << "]" << endl;
+        cout << indentStr << "  start: " << loopNode->start << endl;
+        cout << indentStr << "  increment: " << loopNode->increment << endl;
+        cout << indentStr << "  end_offset: " << loopNode->end_offset << endl;
+        cout << indentStr << "  body:" << endl;
+        printIR(loopNode->body, indent + 2);
+        cout << indentStr << "}" << endl;
     }
-    
-    cout << indentStr << "}" << endl;
-  } else if (auto loopNode = dynamic_pointer_cast<LoopNode>(node)) {
-    cout << indentStr << "LoopNode {" << endl;
-    cout << indentStr << "  variable: '" << loopNode->loop_variable << "'"
-         << endl;
-    cout << indentStr << "  bounds: " << loopNode->shape_var.tensor_name->name
-         << ".shape[" << loopNode->shape_var.idx_posn << "]" << endl;
-    cout << indentStr << "  body:" << endl;
-    printIR(loopNode->body, indent + 2);
-    cout << indentStr << "}" << endl;
-  } else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
-    cout << indentStr << "CalcNode { \"" << calcNode->code_line << "\" }"
-         << endl;
-  }
+    else if (auto calcNode = dynamic_pointer_cast<CalcNode>(node)) {
+        cout << indentStr << "CalcNode { \"" << calcNode->code_line << "\" }" << endl;
+    }
 }
+
+
 // Generate C++ code from IR
 void generateCode(shared_ptr<IRNode> node, const string& resultTempName, int indent = 0, int unrollFactor = 1) {
   
