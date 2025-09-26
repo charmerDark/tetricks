@@ -18,6 +18,9 @@ class IRNode:
 
 @dataclass
 class ShapeVariable:
+    """
+    Mirrors the shapevariable from tetricks backend - might not be necessary
+    """
     tensor_name: str
     idx_posn: int
 
@@ -65,7 +68,6 @@ class SequenceNode(IRNode):
 
 
 class IRParseError(Exception):
-    """Custom exception for parsing errors"""
     pass
 
 
