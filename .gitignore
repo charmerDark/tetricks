@@ -9,3 +9,5 @@ frontend/_build/*
 frontend/input.txt
 frontend/tetricks_frontend
 backend/tetricks_backend
+temp.*
+*.temp
