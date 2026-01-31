@@ -7,4 +7,4 @@ Run `setup.sh`
 
 Please refer to the `run.sh` script for instructions on using the tetricks code generating compiler.
 
-The Mapper can be found mapper dict as `mapper.py`
+The Mapper can be found in the mapper directory as `mapper.py`
