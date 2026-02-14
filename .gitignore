@@ -11,3 +11,6 @@ frontend/tetricks_frontend
 backend/tetricks_backend
 temp.*
 *.temp
+libs/*
+*.json
+*/*.json
